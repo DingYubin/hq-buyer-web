@@ -19,10 +19,10 @@ npm run dev
 
 ## API 配置
 
-默认请求前缀为 `/api/v1`，可通过 `.env` 配置后端地址：
+默认请求前缀为 `/api`，可通过 `.env` 配置后端地址：
 
 ```bash
-VITE_API_BASE_URL=http://localhost:3000/api/v1
+VITE_API_BASE_URL=http://localhost:3000/api
 ```
 
 接口封装在 `src/api/client.js`，路径与 `hq_spc/docs/frontend-api-html/` 中的买家端接口文档保持一致。当前页面使用契约示例数据进行演示；后端可用时，报价选择会按接口契约发起请求，未启动后端时自动保持演示流程。

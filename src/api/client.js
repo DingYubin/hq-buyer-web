@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api'
 
 export const endpoint = (path) => `${API_BASE}${path}`
 
@@ -9,8 +9,15 @@ async function request(path, options = {}) {
     ...options,
   })
   const payload = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(payload?.error?.message || `请求失败（${response.status}）`)
-  return payload.data ?? payload
+  if (!response.ok) {
+    // 统一失败包体：{ code, message }；code = HTTP 状态码 × 100 + 业务编号
+    const error = new Error(payload?.message || `请求失败（${response.status}）`)
+    error.code = payload?.code ?? response.status * 100
+    error.status = response.status
+    throw error
+  }
+  // 统一成功包体：{ code: 0, message: 'ok', data }
+  return payload?.data ?? payload
 }
 
 export const api = {
