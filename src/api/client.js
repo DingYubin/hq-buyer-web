@@ -1,64 +1,202 @@
+// 买方端（PC / App 共用）API 封装。
+// 契约来源：hq_spc/docs/frontend-api-html/buyer-{publish,inquiry-list,quotation-result,cart,order-confirm,address}.html
+// 统一包体：成功 { code: 0, message: 'ok', data }；失败仅 { code, message }，
+// 失败 code = HTTP 状态码 × 100 + 业务编号（40911 版本冲突 / 41001 预览失效 / 42230 校验失败…）。
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api'
 
-export const endpoint = (path) => `${API_BASE}${path}`
+const MOCK_USER_KEY = 'hq-buyer.mock-user'
 
-async function request(path, options = {}) {
-  const response = await fetch(endpoint(path), {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options,
-  })
-  const payload = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    // 统一失败包体：{ code, message }；code = HTTP 状态码 × 100 + 业务编号
-    const error = new Error(payload?.message || `请求失败（${response.status}）`)
-    error.code = payload?.code ?? response.status * 100
-    error.status = response.status
-    throw error
+export const MOCK_USERS = [
+  { value: 'mock-buyer', label: '买方组织（mock-buyer）' },
+  { value: 'mock-other-org', label: '其它买方组织（mock-other-org）' },
+]
+
+function readStoredMockUser() {
+  try {
+    return window.localStorage.getItem(MOCK_USER_KEY) || 'mock-buyer'
+  } catch {
+    return 'mock-buyer'
   }
-  // 统一成功包体：{ code: 0, message: 'ok', data }
-  return payload?.data ?? payload
+}
+
+let mockUser = typeof window === 'undefined' ? 'mock-buyer' : readStoredMockUser()
+
+export function setMockUser(next) {
+  mockUser = next
+  try {
+    window.localStorage.setItem(MOCK_USER_KEY, next)
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getMockUser() {
+  return mockUser
+}
+
+export class ApiError extends Error {
+  constructor(message, code, status) {
+    super(message)
+    this.name = 'ApiError'
+    this.code = code
+    this.status = status
+  }
+}
+
+// 幂等键：写操作建议携带；长度 8–128，字符集 [A-Za-z0-9._:-]
+export function newIdempotencyKey() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return `idem-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+// 数组参数按契约输出为 status[]=A&status[]=B
+export function buildQuery(params) {
+  if (!params) return ''
+  const search = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return
+    if (Array.isArray(value)) {
+      value.forEach((item) => {
+        if (item === undefined || item === null || item === '') return
+        search.append(`${key}[]`, item)
+      })
+      return
+    }
+    search.append(key, value)
+  })
+  const qs = search.toString()
+  return qs ? `?${qs}` : ''
+}
+
+async function request(path, { method = 'GET', body, params, idempotencyKey, headers } = {}) {
+  const finalHeaders = {
+    Accept: 'application/json',
+    // 非生产联调身份：readHeaders 契约要求 Authorization 必填
+    Authorization: `Bearer ${mockUser}`,
+    ...(headers || {}),
+  }
+  if (idempotencyKey) finalHeaders['Idempotency-Key'] = idempotencyKey
+  if (body !== undefined) finalHeaders['Content-Type'] = 'application/json'
+
+  const response = await fetch(`${API_BASE}${path}${buildQuery(params)}`, {
+    method,
+    headers: finalHeaders,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    credentials: 'omit',
+  })
+
+  const text = await response.text()
+  let payload = null
+  try {
+    payload = text ? JSON.parse(text) : null
+  } catch {
+    payload = null
+  }
+
+  if (!response.ok || (payload && payload.code !== 0)) {
+    const code = payload?.code ?? response.status * 100
+    throw new ApiError(payload?.message || `请求失败（HTTP ${response.status}）`, code, response.status)
+  }
+  return payload ? payload.data : null
 }
 
 export const api = {
-  listInquiries: (params = {}) => request(`/inquiries?${new URLSearchParams(params)}`),
-  getInquiry: (id) => request(`/inquiries/${id}`),
-  getInquiryItems: (id) => request(`/inquiries/${id}/items`),
-  getQuotations: (id) => request(`/inquiries/${id}/quotations`),
-  createDraft: (body) => request('/inquiry-drafts', { method: 'POST', body: JSON.stringify(body) }),
-  addDraftItems: (id, body) => request(`/inquiry-drafts/${id}/items`, { method: 'POST', body: JSON.stringify(body) }),
-  mergePreview: (id, body) => request(`/inquiry-drafts/${id}/merge-preview`, { method: 'POST', body: JSON.stringify(body) }),
-  publishInquiry: (body) => request('/inquiries', { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify(body) }),
-  withdrawInquiry: (id, reason) => request(`/inquiries/${id}/withdraw`, { method: 'POST', body: JSON.stringify({ reason }) }),
-  listAddresses: () => request('/addresses'),
-  createAddress: (body) => request('/addresses', { method: 'POST', body: JSON.stringify(body) }),
-  updateAddress: (id, body) => request(`/addresses/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  deleteAddress: (id) => request(`/addresses/${id}`, { method: 'DELETE' }),
-  setDefaultAddress: (id) => request(`/addresses/${id}/default`, { method: 'POST', body: JSON.stringify({}) }),
-  listCarts: () => request('/carts'),
-  getCart: (id) => request(`/carts/${id}`),
-  saveQuotationSelection: (id, body) => request(`/inquiries/${id}/quotation-selection`, { method: 'POST', body: JSON.stringify(body) }),
-  addCartItems: (id, body) => request(`/carts/${id}/items`, { method: 'POST', body: JSON.stringify(body) }),
-  updateCartItem: (cartId, itemId, body) => request(`/carts/${cartId}/items/${itemId}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  deleteCartItem: (cartId, itemId) => request(`/carts/${cartId}/items/${itemId}`, { method: 'DELETE' }),
-  previewOrder: (body) => request('/orders/preview', { method: 'POST', body: JSON.stringify(body) }),
+  // ---------- 发布询价（buyer-publish.html） ----------
+  recognizeVin: (vin) => request(`/vehicles/vin/${encodeURIComponent(vin)}`),
+  listQualities: () => request('/master-data/qualities'),
+  createDraft: (body, key = newIdempotencyKey()) =>
+    request('/inquiry-drafts', { method: 'POST', body, idempotencyKey: key }),
+  getDraft: (draftId) => request(`/inquiry-drafts/${draftId}`),
+  patchDraft: (draftId, body, key = newIdempotencyKey()) =>
+    request(`/inquiry-drafts/${draftId}`, { method: 'PATCH', body, idempotencyKey: key }),
+  saveDraftItems: (draftId, body, key = newIdempotencyKey()) =>
+    request(`/inquiry-drafts/${draftId}/items`, { method: 'PUT', body, idempotencyKey: key }),
+  addDraftItems: (draftId, body, key = newIdempotencyKey()) =>
+    request(`/inquiry-drafts/${draftId}/items`, { method: 'POST', body, idempotencyKey: key }),
+  mergePreview: (draftId, body, key = newIdempotencyKey()) =>
+    request(`/inquiry-drafts/${draftId}/merge-preview`, { method: 'POST', body, idempotencyKey: key }),
+  getDraftAppendOptions: (draftId) => request(`/inquiry-drafts/${draftId}/append-options`),
+  appendDraftResources: (draftId, body, key = newIdempotencyKey()) =>
+    request(`/inquiry-drafts/${draftId}/resources`, { method: 'POST', body, idempotencyKey: key }),
+  replaceDraftResources: (draftId, body, key = newIdempotencyKey()) =>
+    request(`/inquiry-drafts/${draftId}/resources`, { method: 'PUT', body, idempotencyKey: key }),
+  createUploadIntent: (body, key = newIdempotencyKey()) =>
+    request('/resources/upload-intents', { method: 'POST', body, idempotencyKey: key }),
+  completeUpload: (uploadId, body, key = newIdempotencyKey()) =>
+    request(`/resources/${uploadId}/complete`, { method: 'POST', body, idempotencyKey: key }),
+  publishInquiry: (body, key = newIdempotencyKey()) =>
+    request('/inquiries', { method: 'POST', body, idempotencyKey: key }),
+
+  // ---------- 询价单列表 / 详情（buyer-inquiry-list.html） ----------
+  listInquiries: (params) => request('/inquiries', { params }),
+  getInquiry: (inquiryId) => request(`/inquiries/${inquiryId}`),
+  getInquiryItems: (inquiryId) => request(`/inquiries/${inquiryId}/items`),
+  getAppendPolicy: (inquiryId) => request(`/inquiries/${inquiryId}/append-policy`),
+  appendItems: (inquiryId, body, key = newIdempotencyKey()) =>
+    request(`/inquiries/${inquiryId}/append-items`, { method: 'POST', body, idempotencyKey: key }),
+  appendQualities: (inquiryId, body, key = newIdempotencyKey()) =>
+    request(`/inquiries/${inquiryId}/append-qualities`, { method: 'POST', body, idempotencyKey: key }),
+  withdrawInquiry: (inquiryId, body, key = newIdempotencyKey()) =>
+    request(`/inquiries/${inquiryId}/withdraw`, { method: 'POST', body, idempotencyKey: key }),
+  saveNoPurchaseReason: (inquiryId, body, key = newIdempotencyKey()) =>
+    request(`/inquiries/${inquiryId}/no-purchase-reason`, { method: 'PUT', body, idempotencyKey: key }),
+
+  // ---------- 报价结果（buyer-quotation-result.html） ----------
+  listQuotations: (inquiryId, params) => request(`/inquiries/${inquiryId}/quotations`, { params }),
+  getQuotationSelection: (inquiryId) => request(`/inquiries/${inquiryId}/quotation-selection`),
+  saveQuotationSelection: (inquiryId, body, key = newIdempotencyKey()) =>
+    request(`/inquiries/${inquiryId}/quotation-selection`, { method: 'POST', body, idempotencyKey: key }),
+
+  // ---------- 购物车（buyer-cart.html） ----------
+  listCarts: (params) => request('/carts', { params }),
+  getCart: (cartId, params) => request(`/carts/${cartId}`, { params }),
+  createCart: (body = { source: 'QUOTATION' }, key = newIdempotencyKey()) =>
+    request('/carts', { method: 'POST', body, idempotencyKey: key }),
+  addCartItems: (cartId, body, key = newIdempotencyKey()) =>
+    request(`/carts/${cartId}/items`, { method: 'POST', body, idempotencyKey: key }),
+  updateCartItem: (cartId, cartItemId, body, key = newIdempotencyKey()) =>
+    request(`/carts/${cartId}/items/${cartItemId}`, { method: 'PATCH', body, idempotencyKey: key }),
+  deleteCartItem: (cartId, cartItemId, version, key = newIdempotencyKey()) =>
+    request(`/carts/${cartId}/items/${cartItemId}`, {
+      method: 'DELETE',
+      params: { version },
+      idempotencyKey: key,
+    }),
+  mergeCarts: (cartId, body, key = newIdempotencyKey()) =>
+    request(`/carts/${cartId}/merge`, { method: 'POST', body, idempotencyKey: key }),
+  bindCartInquiry: (cartId, body, key = newIdempotencyKey()) =>
+    request(`/carts/${cartId}/bind-inquiry`, { method: 'POST', body, idempotencyKey: key }),
+  clearCart: (cartId, body, key = newIdempotencyKey()) =>
+    request(`/carts/${cartId}/clear`, { method: 'POST', body, idempotencyKey: key }),
+
+  // ---------- 确认订单（buyer-order-confirm.html） ----------
+  previewOrder: (body, key = newIdempotencyKey()) =>
+    request('/orders/preview', { method: 'POST', body, idempotencyKey: key }),
+  submitOrder: (body, key = newIdempotencyKey()) =>
+    request('/orders', { method: 'POST', body, idempotencyKey: key }),
+  saveInvoiceDefault: (body, key = newIdempotencyKey()) =>
+    request('/users/me/invoice-default', { method: 'PUT', body, idempotencyKey: key }),
+
+  // ---------- 收货地址（buyer-address.html） ----------
+  listAddresses: (params) => request('/addresses', { params }),
+  createAddress: (body, key = newIdempotencyKey()) =>
+    request('/addresses', { method: 'POST', body, idempotencyKey: key }),
+  updateAddress: (addressId, body, key = newIdempotencyKey()) =>
+    request(`/addresses/${addressId}`, { method: 'PATCH', body, idempotencyKey: key }),
+  setDefaultAddress: (addressId, body, key = newIdempotencyKey()) =>
+    request(`/addresses/${addressId}/default`, { method: 'POST', body, idempotencyKey: key }),
+  deleteAddress: (addressId, version, key = newIdempotencyKey()) =>
+    request(`/addresses/${addressId}`, { method: 'DELETE', params: { version }, idempotencyKey: key }),
+  getAddressSync: (addressId) => request(`/addresses/${addressId}/sync`),
+  triggerAddressSync: (addressId, body, key = newIdempotencyKey()) =>
+    request(`/addresses/${addressId}/sync`, { method: 'POST', body, idempotencyKey: key }),
 }
 
-export const mock = {
-  inquiries: [
-    { id: 'inq_01', no: 'HQI202609150001', car: '2022款 宝马 3系', vin: 'LSG***8A3', items: '前保险杠、左前大灯、机盖', itemCount: 3, quotations: 4, status: '报价中', statusTone: 'orange', publishedAt: '2026-09-15 09:32', deadline: '2026-09-17 18:00' },
-    { id: 'inq_02', no: 'HQI202609140018', car: '2021款 奥迪 A6L', vin: 'LFV***2P9', items: '右前门、后视镜总成', itemCount: 2, quotations: 2, status: '待报价', statusTone: 'blue', publishedAt: '2026-09-14 16:08', deadline: '2026-09-16 18:00' },
-    { id: 'inq_03', no: 'HQI202609120006', car: '2023款 丰田 凯美瑞', vin: 'LVG***7K1', items: '水箱框架、散热器', itemCount: 2, quotations: 5, status: '已完成', statusTone: 'green', publishedAt: '2026-09-12 10:20', deadline: '2026-09-14 18:00' },
-    { id: 'inq_04', no: 'HQI202609090021', car: '2020款 大众 迈腾', vin: 'LFV***9C2', items: '左后尾灯、后保险杠', itemCount: 2, quotations: 0, status: '已撤回', statusTone: 'gray', publishedAt: '2026-09-09 11:47', deadline: '—' },
-  ],
-  quotations: [
-    { id: 'quo_01', supplier: '优选供应商 A', delivery: '现货 · 1-2天', total: 1860, items: [{ id: 'quo_item_01', name: '前保险杠', oe: '51117379491', quality: '原厂', price: 1280, stock: 2 }, { id: 'quo_item_02', name: '左前大灯', oe: '63117263231', quality: '品牌件', price: 580, stock: 4 }] },
-    { id: 'quo_02', supplier: '优选供应商 B', delivery: '调货 · 3-5天', total: 1620, items: [{ id: 'quo_item_03', name: '前保险杠', oe: '51117379491', quality: '拆车件', price: 920, stock: 1 }, { id: 'quo_item_04', name: '左前大灯', oe: '63117263231', quality: '品牌件', price: 700, stock: 2 }] },
-    { id: 'quo_03', supplier: '优选供应商 C', delivery: '现货 · 2-3天', total: 2040, items: [{ id: 'quo_item_05', name: '前保险杠', oe: '51117379491', quality: '原厂', price: 1400, stock: 1 }, { id: 'quo_item_06', name: '左前大灯', oe: '63117263231', quality: '原厂', price: 640, stock: 1 }] },
-  ],
-  addresses: [
-    { id: 'addr_01', name: '上海明远汽车服务有限公司', contact: '张明', phone: '138****2201', region: '上海市·闵行区', detail: '颛兴东路 1288 号华汽仓配中心', isDefault: true, syncStatus: '已同步' },
-    { id: 'addr_02', name: '苏州明远汽车服务有限公司', contact: '李娜', phone: '139****6712', region: '江苏省·苏州市·虎丘区', detail: '滨河路 899 号', isDefault: false, syncStatus: '待同步' },
-  ],
-  cart: { id: 'cart_01', version: 3, items: [{ id: 'cart_item_01', quotationItemId: 'quo_item_01', supplier: '优选供应商 A', name: '前保险杠', quality: '原厂', price: 1280, quantity: 1 }, { id: 'cart_item_02', quotationItemId: 'quo_item_02', supplier: '优选供应商 A', name: '左前大灯', quality: '品牌件', price: 580, quantity: 1 }] },
+// 资源上传需要 sha256（后端按 64 位十六进制校验）
+export async function sha256Hex(file) {
+  const buffer = await file.arrayBuffer()
+  const digest = await crypto.subtle.digest('SHA-256', buffer)
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
 }

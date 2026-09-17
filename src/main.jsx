@@ -1,54 +1,139 @@
-import React, { useMemo, useState } from 'react'
+// 买方 PC 工作台入口：hash 路由（#/cart?cartId=x）+ 页面级状态。
+// 契约页面：工作台 / 发布询价 / 询价单列表 / 报价结果 / 购物车 / 确认订单 / 收货地址。
+// 所有数据都来自 hq-buyer-service 真实接口（Authorization: Bearer mock-buyer），前端不做金额计算。
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Activity, Bell, Box, CarFront, ChevronRight, ClipboardList, FilePlus2, Home, MapPin, Menu, PackageCheck, Plus, Search, Settings2, ShoppingCart, Sparkles, Truck, UserRound, X } from 'lucide-react'
-import { api, mock } from './api/client'
+import { api } from './api/client'
+import { AppShell, NAV_ITEMS } from './components/AppShell'
+import { ToastProvider } from './components/ui'
+import AddressPage from './pages/AddressPage'
+import CartPage from './pages/CartPage'
+import DashboardPage from './pages/DashboardPage'
+import InquiryListPage from './pages/InquiryListPage'
+import OrderConfirmPage from './pages/OrderConfirmPage'
+import PublishInquiryPage from './pages/PublishInquiryPage'
+import QuotationResultPage from './pages/QuotationResultPage'
 import './styles.css'
 
-const navItems = [
-  { key: 'home', label: '工作台', icon: Home },
-  { key: 'publish', label: '发布询价', icon: FilePlus2 },
-  { key: 'inquiries', label: '我的询价单', icon: ClipboardList },
-  { key: 'quotes', label: '报价结果', icon: PackageCheck },
-  { key: 'cart', label: '购物车', icon: ShoppingCart, badge: 2 },
-  { key: 'addresses', label: '收货地址', icon: MapPin },
-]
-const money = (n) => `¥${Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2 })}`
+const ROUTES = new Set(['dashboard', 'publish', 'inquiries', 'quotation-result', 'cart', 'order-confirm', 'addresses'])
 
-function App() {
-  const [page, setPage] = useState('home')
-  const [mobileNav, setMobileNav] = useState(false)
-  const [toast, setToast] = useState('')
-  const [selectedInquiry, setSelectedInquiry] = useState(mock.inquiries[0])
-  const [cart, setCart] = useState(mock.cart)
-  const notify = (message) => { setToast(message); window.clearTimeout(window.__toastTimer); window.__toastTimer = window.setTimeout(() => setToast(''), 2600) }
-  const go = (next) => { setPage(next); setMobileNav(false) }
-  return <div className="app-shell">
-    <header className="topbar"><button className="mobile-menu" onClick={() => setMobileNav(true)}><Menu size={20}/></button><div className="brand"><span className="brand-mark">华</span><span>华汽<span className="brand-dot">·</span>买方工作台</span></div><div className="top-search"><Search size={17}/><input placeholder="搜索询价单号、VIN 或车型" onKeyDown={(e) => e.key === 'Enter' && go('inquiries')} /></div><div className="top-actions"><button className="icon-btn" aria-label="通知"><Bell size={19}/><i>3</i></button><div className="user-chip"><span className="avatar">明</span><span className="user-copy"><b>明远汽服</b><small>买方组织</small></span><ChevronRight size={16}/></div></div></header>
-    <div className="layout"><aside className={`sidebar ${mobileNav ? 'open' : ''}`}><div className="sidebar-top"><span>工作空间</span><button className="close-menu" onClick={() => setMobileNav(false)}><X size={18}/></button></div><nav>{navItems.map(({ key, label, icon: Icon, badge }) => <button key={key} className={page === key ? 'active' : ''} onClick={() => go(key)}><Icon size={18}/><span>{label}</span>{badge && <em>{badge}</em>}</button>)}</nav><div className="sidebar-foot"><div className="support-icon"><Sparkles size={17}/></div><div><b>需要帮助？</b><small>查看接口与操作指引</small></div></div></aside>{mobileNav && <div className="nav-overlay" onClick={() => setMobileNav(false)} />}
-    <main className="main-content">{page === 'home' && <Dashboard go={go} inquiries={mock.inquiries}/>} {page === 'publish' && <Publish notify={notify} go={go}/>} {page === 'inquiries' && <Inquiries notify={notify} go={go} onSelect={(inq) => { setSelectedInquiry(inq); go('quotes') }} />} {page === 'quotes' && <Quotes inquiry={selectedInquiry} notify={notify} onAdd={(item) => setCart((c) => ({ ...c, items: c.items.some(x => x.quotationItemId === item.id) ? c.items : [...c.items, { id: `cart_${Date.now()}`, quotationItemId: item.id, supplier: '优选供应商 A', name: item.name, quality: item.quality, price: item.price, quantity: 1 }] }))} go={go}/>} {page === 'cart' && <Cart cart={cart} setCart={setCart} notify={notify} go={go}/>} {page === 'addresses' && <Addresses notify={notify}/>}</main></div>{toast && <div className="toast"><Activity size={17}/>{toast}</div>}
-  </div>
+/** 解析 location.hash：'#/cart?cartId=cart_1' → { path: 'cart', params: URLSearchParams } */
+function parseHash() {
+  const raw = window.location.hash.replace(/^#\/?/, '')
+  const [path, search] = raw.split('?')
+  const next = ROUTES.has(path) ? path : 'dashboard'
+  return { path: next, params: new URLSearchParams(search || '') }
 }
 
-function PageHead({ eyebrow, title, description, action }) { return <div className="page-head"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>{action}</div> }
-function Status({ tone = 'gray', children }) { return <span className={`status status-${tone}`}><span/>{children}</span> }
-function Button({ children, variant = 'primary', ...props }) { return <button className={`btn btn-${variant}`} {...props}>{children}</button> }
-function Card({ children, className = '' }) { return <section className={`card ${className}`}>{children}</section> }
-function Dashboard({ go, inquiries }) { return <><PageHead eyebrow="首页 / 工作台" title="早上好，明先生" description="今天也高效完成配件采购吧。" action={<Button onClick={() => go('publish')}><Plus size={17}/>发布询价</Button>}/><div className="hero-banner"><div><span className="hero-kicker">华汽采购助手</span><h2>让每一次采购<br/><strong>更简单、更透明</strong></h2><p>从发布询价到收货确认，全流程在线协作。</p><Button variant="soft" onClick={() => go('publish')}>开始发布询价 <ChevronRight size={16}/></Button></div><div className="hero-art"><div className="art-circle"/><CarFront size={105}/><div className="float-card"><span>本月已节省</span><b>¥12,680</b><small>较上月 ↑ 18.6%</small></div></div></div><div className="stats-grid"><Stat label="进行中询价" value="2" meta="较昨日 +1" tone="orange" icon={<ClipboardList/>}/><Stat label="待处理报价" value="6" meta="来自 3 家供应商" icon={<PackageCheck/>}/><Stat label="购物车商品" value={String(mock.cart.items.length)} meta="预计 ¥1,860.00" icon={<ShoppingCart/>}/><Stat label="待收货订单" value="3" meta="其中 1 个即将送达" icon={<Truck/>}/></div><div className="content-columns"><Card><div className="card-head"><div><h3>最近询价单</h3><p>查看最新的询价进度</p></div><button className="link-btn" onClick={() => go('inquiries')}>查看全部 <ChevronRight size={15}/></button></div><div className="inquiry-mini-list">{inquiries.slice(0, 3).map(i => <div className="mini-row" key={i.id}><div className="mini-icon"><CarFront size={18}/></div><div className="mini-main"><b>{i.car}</b><span>{i.no} · {i.items}</span></div><div className="mini-meta"><Status tone={i.statusTone}>{i.status}</Status><small>{i.publishedAt.slice(5)}</small></div></div>)}</div></Card><Card className="quick-card"><div className="card-head"><div><h3>常用功能</h3><p>快速进入工作流程</p></div></div><div className="quick-grid"><Quick icon={<FilePlus2/>} label="发布询价" onClick={() => go('publish')}/><Quick icon={<PackageCheck/>} label="查看报价" onClick={() => go('quotes')}/><Quick icon={<ShoppingCart/>} label="购物车" onClick={() => go('cart')}/><Quick icon={<MapPin/>} label="收货地址" onClick={() => go('addresses')}/></div></Card></div></> }
-function Stat({ label, value, meta, tone, icon }) { return <div className="stat-card"><div className={`stat-icon ${tone || ''}`}>{icon}</div><span>{label}</span><b className={tone || ''}>{value}</b><small>{meta}</small></div> }
-function Quick({ icon, label, onClick }) { return <button className="quick-item" onClick={onClick}><span>{icon}</span><b>{label}</b><ChevronRight size={15}/></button> }
+function App() {
+  const [route, setRoute] = useState(parseHash)
+  const [cartCount, setCartCount] = useState(0)
 
-function Publish({ notify, go }) { const [step, setStep] = useState(1); const [vin, setVin] = useState('LSGAA53D6NA108268'); const [model, setModel] = useState('2022款 宝马 3系 325Li M运动套装'); const [items, setItems] = useState([{ name: '前保险杠', oe: '51117379491', quality: '原厂', qty: 1 }, { name: '左前大灯', oe: '63117263231', quality: '品牌件', qty: 1 }]); const [address, setAddress] = useState('上海明远汽车服务有限公司 · 颛兴东路 1288 号');
-  const addItem = () => setItems([...items, { name: '', oe: '', quality: '原厂', qty: 1 }]); const publish = () => { notify('询价已发布，正在为你匹配供应商'); go('inquiries') }
-  return <><PageHead eyebrow="采购中心 / 发布询价" title="发布询价" description="填写车辆和配件信息，向合作供应商发起询价。" action={<div className="draft-state"><span className="dot-live"/>草稿已自动保存</div>}/><div className="stepper"><div className={step >= 1 ? 'done' : ''}><span>1</span><b>车辆信息</b></div><i/><div className={step >= 2 ? 'done' : ''}><span>2</span><b>配件清单</b></div><i/><div className={step >= 3 ? 'done' : ''}><span>3</span><b>发布确认</b></div></div><div className="form-layout"><Card><div className="card-head"><div><h3>{step === 1 ? '车辆信息' : step === 2 ? '录入配件信息' : '发布确认'}</h3><p>{step === 1 ? '输入 VIN 自动识别车型，也可以手动选择。' : step === 2 ? '支持 OE 码、配件名称和品质要求。' : '确认询价信息后即可发布。'}</p></div></div><div className="form-body">{step === 1 && <><label>VIN 码 <em>必填</em><input value={vin} onChange={e => setVin(e.target.value.toUpperCase())} placeholder="请输入 17 位 VIN 码"/><small className="field-hint">已识别 · VIN 需 17 位大写且不含 I/O/Q</small></label><label>车型<input value={model} onChange={e => setModel(e.target.value)}/></label><div className="vehicle-preview"><div className="vehicle-photo"><CarFront size={58}/></div><div><b>BMW 3 Series</b><span>2022 · G20 · 325Li</span><small>车辆识别状态：<strong>已确认</strong></small></div></div></>}{step === 2 && <><div className="items-toolbar"><span>配件清单 <b>{items.length} 项</b></span><button className="link-btn" onClick={addItem}><Plus size={15}/>添加配件</button></div><div className="parts-list">{items.map((item, idx) => <div className="part-row" key={idx}><span className="part-index">{String(idx + 1).padStart(2, '0')}</span><input value={item.name} onChange={e => setItems(items.map((x, i) => i === idx ? {...x, name:e.target.value} : x))} placeholder="配件名称"/><input value={item.oe} onChange={e => setItems(items.map((x, i) => i === idx ? {...x, oe:e.target.value} : x))} placeholder="OE 码（可选）"/><select value={item.quality} onChange={e => setItems(items.map((x, i) => i === idx ? {...x, quality:e.target.value} : x))}><option>原厂</option><option>品牌件</option><option>拆车件</option></select><div className="qty"><button onClick={() => setItems(items.map((x,i) => i===idx?{...x,qty:Math.max(1,x.qty-1)}:x))}>−</button><span>{item.qty}</span><button onClick={() => setItems(items.map((x,i) => i===idx?{...x,qty:x.qty+1}:x))}>+</button></div>{items.length > 1 && <button className="remove-btn" onClick={() => setItems(items.filter((_,i)=>i!==idx))}>×</button>}</div>)}</div><div className="quality-box"><div><Settings2 size={18}/><b>品质要求</b></div><div className="quality-tags"><span>支持原厂件</span><span>支持品牌件</span><span>需要质保凭证</span></div></div></>}{step === 3 && <><div className="confirm-block"><span>车辆信息</span><b>{model}</b><small>VIN：{vin.slice(0, 8)}***{vin.slice(-4)}</small></div><div className="confirm-block"><span>配件清单（{items.length} 项）</span>{items.map(i => <div className="confirm-line" key={i.name}><b>{i.name || '未填写配件'}</b><small>{i.quality} × {i.qty}</small></div>)}</div><label>收货地址 <em>必填</em><select value={address} onChange={e => setAddress(e.target.value)}><option>上海明远汽车服务有限公司 · 颛兴东路 1288 号</option><option>苏州明远汽车服务有限公司 · 滨河路 899 号</option></select></label><label>补充说明<textarea placeholder="请输入对供应商的其他要求（可选）" rows="4"/></label></>}</div><div className="form-footer">{step > 1 && <Button variant="ghost" onClick={() => setStep(step - 1)}>上一步</Button>}<span/>{step < 3 ? <Button onClick={() => { if (step === 1 && vin.length !== 17) { notify('请输入 17 位 VIN 码'); return } setStep(step + 1) }}>下一步 <ChevronRight size={16}/></Button> : <Button onClick={publish}>确认发布询价 <Sparkles size={16}/></Button>}</div></Card><aside className="side-tip"><div className="tip-icon"><Sparkles size={18}/></div><b>发布小贴士</b><p>填写准确的 OE 码和品质要求，供应商可以更快给出精准报价。</p><div className="tip-line"><span>当前草稿</span><strong>{items.length} 项配件</strong></div><div className="tip-line"><span>预计报价</span><strong>24 小时内</strong></div></aside></div></> }
+  const navigate = useCallback((target) => {
+    const next = String(target || 'dashboard').replace(/^#?\/?/, '')
+    if (`#/${next}` === window.location.hash) {
+      setRoute(parseHash())
+      return
+    }
+    window.location.hash = `#/${next}`
+  }, [])
 
-function Inquiries({ notify, go, onSelect }) { const [query, setQuery] = useState(''); const [tab, setTab] = useState('全部'); const [rows, setRows] = useState(mock.inquiries); const filtered = rows.filter(i => (tab === '全部' || i.status === tab) && `${i.no}${i.car}${i.vin}`.toLowerCase().includes(query.toLowerCase())); const withdraw = (id) => { setRows(rows.map(i => i.id === id ? {...i, status:'已撤回', statusTone:'gray'} : i)); notify('询价单已撤回') }
-  return <><PageHead eyebrow="采购中心 / 我的询价单" title="我的询价单" description="管理你发起的询价，查看报价进度和询价详情。" action={<Button onClick={() => go('publish')}><Plus size={17}/>发布询价</Button>}/><div className="tabs-row"><div className="tabs">{['全部','报价中','待报价','已完成','已撤回'].map(t => <button className={tab === t ? 'active' : ''} onClick={() => setTab(t)} key={t}>{t}<span>{t === '全部' ? rows.length : rows.filter(i=>i.status===t).length}</span></button>)}</div><div className="table-search"><Search size={16}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索询价单号 / 车型"/></div></div><Card className="table-card"><div className="table-scroll"><table><thead><tr><th>询价单</th><th>车辆信息</th><th>配件摘要</th><th>报价进度</th><th>发布时间</th><th>状态</th><th>操作</th></tr></thead><tbody>{filtered.map(i => <tr key={i.id}><td><b className="link-text">{i.no}</b><small>截止 {i.deadline}</small></td><td><b>{i.car}</b><small>VIN {i.vin}</small></td><td><span>{i.items}</span><small>{i.itemCount} 项配件</small></td><td><div className="progress-label"><b>{i.quotations}</b> 家供应商已报价</div><div className="progress"><i style={{width: `${Math.min(100, i.quotations * 20)}%`}}/></div></td><td>{i.publishedAt}</td><td><Status tone={i.statusTone}>{i.status}</Status></td><td><div className="row-actions"><button onClick={() => onSelect(i)}>查看报价</button>{['报价中','待报价'].includes(i.status) && <button className="danger-link" onClick={() => withdraw(i.id)}>撤回</button>}</div></td></tr>)}{!filtered.length && <tr><td colSpan="7" className="empty">没有匹配的询价单</td></tr>}</tbody></table></div><div className="pagination"><span>共 {filtered.length} 条记录</span><button className="current">1</button><button>2</button><button>›</button></div></Card></> }
+  useEffect(() => {
+    const onHashChange = () => {
+      setRoute(parseHash())
+      window.scrollTo({ top: 0 })
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
 
-function Quotes({ inquiry, notify, onAdd, go }) { const [selected, setSelected] = useState({}); const [loading, setLoading] = useState(false); const choose = (item, supplier) => { setSelected({...selected, [item.id]: { item, supplier } }); onAdd(item); notify(`已将「${item.name}」加入购物车`) }; const submit = async () => { setLoading(true); try { await api.saveQuotationSelection(inquiry.id, { selections: Object.values(selected).map(({item}) => ({ inquiryItemId: 'inq_item_01', quotationItemId: item.id, quantity: 1 })), version: 2 }) } catch { /* 后端未启动时保持演示模式 */ } finally { setLoading(false); notify('报价选择已保存'); go('cart') } }
-  return <><PageHead eyebrow="采购中心 / 报价结果" title="查看报价" description={`${inquiry.car} · ${inquiry.no}`} action={<Button variant="ghost" onClick={() => go('inquiries')}>返回询价单</Button>}/><div className="quote-summary"><div className="vehicle-chip"><div className="vehicle-mini"><CarFront size={28}/></div><div><b>{inquiry.car}</b><span>VIN {inquiry.vin} · {inquiry.itemCount} 项配件</span></div></div><div className="quote-deadline"><span>报价截止</span><b>{inquiry.deadline}</b></div><div><Status tone="orange">{inquiry.status}</Status></div></div><div className="quote-grid"><div>{mock.quotations.map(q => <Card className="quote-card" key={q.id}><div className="quote-card-head"><div className="supplier-avatar">{q.supplier.slice(-1)}</div><div><b>{q.supplier}</b><span><span className="verified">✓ 已认证</span> · {q.delivery}</span></div><strong>{money(q.total)}<small> 合计</small></strong></div><div className="quote-items">{q.items.map(item => <div className="quote-item" key={item.id}><div><b>{item.name}</b><span>OE {item.oe} · {item.quality}</span></div><strong>{money(item.price)}</strong><Button variant={selected[item.id] ? 'selected' : 'outline'} onClick={() => choose(item, q.supplier)}>{selected[item.id] ? '已选择' : '选购'}</Button></div>)}</div><div className="quote-card-foot"><span><Truck size={15}/>预计 {q.delivery}</span><button className="link-btn">查看供应商详情 <ChevronRight size={15}/></button></div></Card>)}</div><aside className="selection-panel"><Card><div className="card-head"><div><h3>已选报价</h3><p>按配件选择最合适的报价</p></div><span className="selection-count">{Object.keys(selected).length}</span></div><div className="selected-list">{Object.values(selected).map(({item, supplier}) => <div key={item.id}><span className="selected-dot"/><div><b>{item.name}</b><small>{supplier}</small></div><strong>{money(item.price)}</strong></div>)}{!Object.keys(selected).length && <div className="selected-empty"><PackageCheck size={28}/><p>点击「选购」加入报价</p></div>}</div><div className="selection-total"><span>已选合计</span><b>{money(Object.values(selected).reduce((s, x) => s + x.item.price, 0))}</b></div><Button disabled={!Object.keys(selected).length || loading} onClick={submit}>{loading ? '保存中…' : '保存选择并去购物车'} <ChevronRight size={16}/></Button></Card></aside></div></> }
+  // 购物车角标：跨页面（购物车 / 确认订单）都会改动购物车，所以按路由变化重新拉取。
+  const refreshCartCount = useCallback(async () => {
+    try {
+      const carts = await api.listCarts({ status: 'ACTIVE', pageNum: 1, pageSize: 5 })
+      let total = 0
+      for (const cart of carts.list || []) {
+        const detail = await api.getCart(cart.cartId, { pageNum: 1, pageSize: 100 })
+        total += (detail.list || []).length
+      }
+      setCartCount(total)
+    } catch {
+      /* 角标失败不阻塞页面 */
+    }
+  }, [])
 
-function Cart({ cart, setCart, notify, go }) { const total = cart.items.reduce((s, i) => s + i.price * i.quantity, 0); const change = (id, delta) => setCart({...cart, items: cart.items.map(i => i.id === id ? {...i, quantity: Math.max(1, i.quantity + delta)} : i), version: cart.version + 1}); const remove = (id) => { setCart({...cart, items: cart.items.filter(i=>i.id!==id), version: cart.version+1}); notify('商品已从购物车移除') }; return <><PageHead eyebrow="采购中心 / 购物车" title="购物车" description="确认已选报价，绑定询价单后进入订单结算。" action={<Button variant="ghost" onClick={() => go('quotes')}>继续选购 <ChevronRight size={16}/></Button>}/><div className="cart-layout"><div><Card className="cart-card"><div className="card-head"><div><h3>已选配件 <span className="muted-count">{cart.items.length} 件</span></h3><p>报价快照有效期内可直接结算</p></div><Status tone="green">价格已锁定</Status></div>{cart.items.length ? <div className="cart-items">{cart.items.map(i => <div className="cart-row" key={i.id}><div className="cart-thumb"><Box size={23}/></div><div className="cart-info"><b>{i.name}</b><span>{i.supplier} · {i.quality}</span><small>报价明细 ID：{i.quotationItemId}</small></div><strong className="cart-price">{money(i.price)}</strong><div className="qty cart-qty"><button onClick={() => change(i.id,-1)}>−</button><span>{i.quantity}</span><button onClick={() => change(i.id,1)}>+</button></div><button className="remove-btn" onClick={() => remove(i.id)}>删除</button></div>)}</div> : <div className="cart-empty"><ShoppingCart size={38}/><b>购物车还是空的</b><p>去报价结果选择需要的配件</p><Button onClick={() => go('quotes')}>去查看报价</Button></div>}<div className="cart-footer"><span>当前购物车版本 v{cart.version}</span><button className="link-btn" onClick={() => notify('购物车已保存')}>保存购物车</button></div></Card></div><aside><Card className="checkout-card"><h3>结算摘要</h3><div className="summary-line"><span>商品金额</span><b>{money(total)}</b></div><div className="summary-line"><span>预计运费</span><b>待确认</b></div><div className="summary-line total"><span>预计合计</span><b>{money(total)}</b></div><label className="select-label">绑定询价单<select><option>HQI202609150001 · 宝马 3系</option></select></label><Button disabled={!cart.items.length} onClick={() => notify('已生成订单预览，待接入结算页')}>去结算 <ChevronRight size={16}/></Button><small className="secure-note">订单提交前将再次校验报价有效期与库存</small></Card><div className="checkout-tip"><Sparkles size={17}/><span>报价来自服务端快照，价格以结算时校验结果为准。</span></div></aside></div></> }
+  useEffect(() => {
+    if (route.path === 'cart') return
+    refreshCartCount()
+  }, [refreshCartCount, route.path])
 
-function Addresses({ notify }) { const [addresses, setAddresses] = useState(mock.addresses); const [editing, setEditing] = useState(null); const [form, setForm] = useState({ name:'', contact:'', phone:'', region:'', detail:'' }); const open = (a) => { setEditing(a?.id || 'new'); setForm(a || { name:'', contact:'', phone:'', region:'', detail:'' }) }; const save = () => { if (!form.name || !form.contact || !form.detail) return notify('请填写完整地址信息'); if (editing === 'new') setAddresses([...addresses, {...form, id:`addr_${Date.now()}`, isDefault:false, syncStatus:'待同步'}]); else setAddresses(addresses.map(a => a.id === editing ? {...a, ...form} : a)); setEditing(null); notify('收货地址已保存') }; const setDefault = (id) => { setAddresses(addresses.map(a => ({...a, isDefault:a.id===id}))); notify('默认地址已更新') }; const remove = (id) => { setAddresses(addresses.filter(a => a.id !== id)); notify('地址已删除') }; return <><PageHead eyebrow="采购中心 / 收货地址" title="收货地址" description="管理收货地址，订单结算时将使用默认地址。" action={<Button onClick={() => open()}><Plus size={17}/>新增地址</Button>}/><div className="address-layout"><div className="address-list">{addresses.map(a => <Card className={`address-card ${a.isDefault ? 'default' : ''}`} key={a.id}><div className="address-ribbon">{a.isDefault ? '默认地址' : '收货地址'}</div><div className="address-head"><div className="address-icon"><MapPin size={20}/></div><div><b>{a.name}</b><span>{a.contact} · {a.phone}</span></div><Status tone={a.syncStatus === '已同步' ? 'green' : 'orange'}>{a.syncStatus}</Status></div><p className="address-detail">{a.region} {a.detail}</p><div className="address-actions"><button onClick={() => open(a)}>编辑</button>{!a.isDefault && <button onClick={() => setDefault(a.id)}>设为默认</button>}<button className="danger-link" onClick={() => remove(a.id)}>删除</button></div></Card>)}</div><aside className="address-note"><div className="tip-icon"><Truck size={18}/></div><b>地址同步</b><p>地址会先保存到华汽，再同步到开思修理厂。同步状态不会影响地址使用。</p><div className="sync-row"><span>已同步</span><strong>{addresses.filter(a=>a.syncStatus==='已同步').length} 个</strong></div><div className="sync-row"><span>待同步</span><strong>{addresses.filter(a=>a.syncStatus!=='已同步').length} 个</strong></div></aside></div>{editing && <div className="modal-backdrop" onClick={() => setEditing(null)}><div className="modal" onClick={e => e.stopPropagation()}><div className="modal-head"><div><h3>{editing === 'new' ? '新增收货地址' : '编辑收货地址'}</h3><p>请填写完整的收货信息</p></div><button onClick={() => setEditing(null)}><X size={18}/></button></div><div className="modal-body"><label>单位名称<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="请输入单位名称"/></label><div className="field-row"><label>联系人<input value={form.contact} onChange={e=>setForm({...form,contact:e.target.value})} placeholder="联系人"/></label><label>联系电话<input value={form.phone} onChange={e=>setForm({...form,phone:e.target.value})} placeholder="联系电话"/></label></div><label>所在地区<input value={form.region} onChange={e=>setForm({...form,region:e.target.value})} placeholder="省 / 市 / 区"/></label><label>详细地址<textarea rows="3" value={form.detail} onChange={e=>setForm({...form,detail:e.target.value})} placeholder="请输入街道、门牌号"/></label></div><div className="modal-foot"><Button variant="ghost" onClick={() => setEditing(null)}>取消</Button><Button onClick={save}>保存地址</Button></div></div></div>}</> }
+  const cartItemIds = useMemo(
+    () => (route.params.get('cartItemIds') || '').split(',').filter(Boolean),
+    [route.params],
+  )
 
-createRoot(document.getElementById('root')).render(<App />)
+  const topKey = route.path === 'order-confirm' ? 'cart' : route.path
+  const activeNav = NAV_ITEMS.some((item) => item.key === topKey) ? topKey : 'dashboard'
+  const pageKey = `${route.path}?${route.params.toString()}`
+
+  const renderPage = () => {
+    switch (route.path) {
+      case 'publish':
+        return (
+          <PublishInquiryPage
+            onNavigate={navigate}
+            draftId={route.params.get('draftId') || undefined}
+          />
+        )
+      case 'inquiries':
+        return (
+          <InquiryListPage
+            onNavigate={navigate}
+            keyword={route.params.get('keyword') || ''}
+            highlight={route.params.get('highlight') || undefined}
+          />
+        )
+      case 'quotation-result':
+        return (
+          <QuotationResultPage
+            onNavigate={navigate}
+            inquiryId={route.params.get('inquiryId') || undefined}
+          />
+        )
+      case 'cart':
+        return (
+          <CartPage
+            cartId={route.params.get('cartId') || undefined}
+            onNavigate={navigate}
+            onCartChange={setCartCount}
+          />
+        )
+      case 'order-confirm':
+        return (
+          <OrderConfirmPage
+            cartId={route.params.get('cartId') || undefined}
+            cartItemIds={cartItemIds}
+            onNavigate={navigate}
+          />
+        )
+      case 'addresses':
+        return <AddressPage onNavigate={navigate} />
+      default:
+        return <DashboardPage onNavigate={navigate} />
+    }
+  }
+
+  return (
+    <AppShell path={activeNav} onNavigate={navigate} cartCount={cartCount}>
+      <div key={pageKey}>{renderPage()}</div>
+    </AppShell>
+  )
+}
+
+createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <ToastProvider>
+      <App />
+    </ToastProvider>
+  </React.StrictMode>,
+)
