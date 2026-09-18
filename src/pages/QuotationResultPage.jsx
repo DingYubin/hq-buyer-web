@@ -22,6 +22,17 @@ const REASON_STATUS = ['PUBLISHED', 'QUOTING', 'PARTIALLY_QUOTED', 'QUOTED']
 
 const money = (value) => (value === null || value === undefined ? '—' : `¥${amount(value)}`)
 
+/** 将历史接口的库存枚举和交期统一成原型中的「现货 / 调货 · N 天」标签。 */
+const supplyStatusMeta = (quote) => {
+  const leadTimeDays = Number(quote?.leadTimeDays || 0)
+  if (leadTimeDays > 0 && !quote?.unavailableReason) {
+    return { label: `调货 · ${leadTimeDays} 天`, tone: 'orange' }
+  }
+  const status = stockStatusMeta(quote?.stockStatus)
+  if (status.label === 'IN_STOCK') return { label: '现货', tone: 'green' }
+  return status
+}
+
 export default function QuotationResultPage({ inquiryId, onNavigate }) {
   const notify = useToast()
   /** 竞态保护：StrictMode 下 effect 会跑两次，丢弃过期响应；用户已操作后不再用服务端结果覆盖本地选择。 */
@@ -38,7 +49,7 @@ export default function QuotationResultPage({ inquiryId, onNavigate }) {
   })
   const [selected, setSelected] = useState({})
   const [busy, setBusy] = useState(false)
-  const [tab, setTab] = useState('PART')
+  const [tab, setTab] = useState('SUPPLIER')
   const [reason, setReason] = useState({ open: false, text: '', busy: false })
 
   const load = useCallback(async () => {
@@ -142,7 +153,7 @@ export default function QuotationResultPage({ inquiryId, onNavigate }) {
         }, 0)
         return { ...supplier, covered: covered.size, total, complete: total > 0 && covered.size === total, wholeTotal }
       })
-      .sort((a, b) => Number(b.complete) - Number(a.complete) || a.wholeTotal - b.wholeTotal)
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
   }, [state.quotes, groups])
 
   const bestWholeSupplier = useMemo(() => {
@@ -324,7 +335,7 @@ export default function QuotationResultPage({ inquiryId, onNavigate }) {
           </div>
           <div className="quote-items">
             {group.rows.map((quote) => {
-              const stock = stockStatusMeta(quote.stockStatus)
+              const stock = supplyStatusMeta(quote)
               const active = selected[group.inquiryItemId]?.quotationItemId === quote.quotationItemId
               const disabled = Boolean(quote.unavailableReason)
               return (
@@ -433,7 +444,7 @@ export default function QuotationResultPage({ inquiryId, onNavigate }) {
               {supplier.rows.map((quote) => {
                 const group = groups.find((row) => row.inquiryItemId === quote.inquiryItemId)
                 const item = itemById.get(quote.inquiryItemId)
-                const stock = stockStatusMeta(quote.stockStatus)
+                const stock = supplyStatusMeta(quote)
                 const active = selected[quote.inquiryItemId]?.quotationItemId === quote.quotationItemId
                 const disabled = Boolean(quote.unavailableReason)
                 return (
@@ -517,8 +528,9 @@ export default function QuotationResultPage({ inquiryId, onNavigate }) {
       <Card className="quote-vehicle-card">
         <div className="qv-head">
           <div className="qv-title">
-            {inquiry?.vehicleModelName && <b className="qv-model">{inquiry.vehicleModelName}</b>}
-            <b data-testid="quote-inquiry-no">{inquiry?.inquiryNo || '—'}</b>
+            {(inquiry?.vehicleModelName || inquiry?.vehicleModel) && (
+              <b className="qv-model">{inquiry.vehicleModelName || inquiry.vehicleModel}</b>
+            )}
             <Status tone={meta.tone}>{meta.label}</Status>
             {supplierGroups.length > 0 && (
               <span className="qv-supplier-badge">
@@ -546,6 +558,9 @@ export default function QuotationResultPage({ inquiryId, onNavigate }) {
           </span>
           <span>
             报价行 <b data-testid="quote-total">{state.quotes.length}</b>
+          </span>
+          <span>
+            询价单号 <b data-testid="quote-inquiry-no">{inquiry?.inquiryNo || '—'}</b>
           </span>
         </div>
       </Card>

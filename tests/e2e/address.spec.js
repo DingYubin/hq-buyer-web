@@ -12,15 +12,16 @@ import {
 
 const stamp = () => String(Date.now()).slice(-7)
 
+// pageSize 需与页面 PAGE_SIZE 对齐：首屏只渲染第一页，快照取全量会比页面多。
 const listAddresses = (request, status) =>
-  apiOk(request, `/api/addresses?pageNum=1&pageSize=100${status ? `&status=${status}` : ''}`)
+  apiOk(request, `/api/addresses?pageNum=1&pageSize=5${status ? `&status=${status}` : ''}`)
 
 test.describe('收货地址', () => {
   test.beforeAll(async ({ request }) => {
     await requireBackend(request)
   })
 
-  test('列表：6 列按契约顺序渲染，总数、同步状态与接口一致', async ({ page, request }) => {
+  test('列表：6 列按契约顺序渲染，总数与接口一致', async ({ page, request }) => {
     const data = await listAddresses(request, 'ACTIVE')
     await openPage(page, 'addresses')
 
@@ -28,9 +29,6 @@ test.describe('收货地址', () => {
     await expect(page.getByTestId('address-row')).toHaveCount(data.list.length)
     await expect(page.getByTestId('address-count')).toContainText(`已保存 ${data.total} 条地址`)
     await expect(page.getByTestId('address-tabs').getByRole('button')).toHaveText(ADDRESS_TABS)
-    await expect(page.getByTestId('sync-synced')).toHaveText(
-      String(data.list.filter((row) => row.syncStatus === 'SYNCED').length),
-    )
 
     if (data.list.length > 0) {
       const first = data.list[0]
@@ -41,8 +39,8 @@ test.describe('收货地址', () => {
       await expect(cells.nth(3)).toHaveText(first.contact.phone)
       // 原型「固定号码」列：接口未传时回落为占位符
       await expect(cells.nth(4)).toHaveText(first.tel || '—')
-      await expect(cells.nth(5)).toContainText(SYNC_STATUS_LABEL[first.syncStatus])
       // 操作列：编辑按钮始终存在；仅非默认且 ACTIVE 的行才有「设为默认」
+      await expect(cells.nth(5)).toContainText('编辑')
       await expect(page.getByTestId('address-row').first().getByTestId('address-edit')).toBeVisible()
       if (!first.isDefault && first.status === 'ACTIVE') {
         await expect(page.getByTestId('address-row').first().getByTestId('address-set-default')).toBeVisible()
@@ -64,7 +62,7 @@ test.describe('收货地址', () => {
     await page.getByTestId('address-contact-name').fill('端到端收货人')
     await page.getByTestId('address-contact-phone').fill('12345')
     await page.getByTestId('address-region-text').fill('云南省 昆明市 官渡区 矣六街道')
-    await page.getByTestId('address-region-codes').fill('530000,530100,530111')
+    await page.getByTestId('address-region-codes').fill('530000,530100,530111,53011110')
     await page.getByTestId('address-detail').fill(detail)
     await page.getByTestId('address-save').click()
     await expect(page.getByTestId('address-modal')).toBeVisible()
@@ -82,12 +80,12 @@ test.describe('收货地址', () => {
     const row = page.getByTestId('address-row').filter({ hasText: label })
     await expect(row).toHaveCount(1)
 
-    // POST /api/addresses 只回键 + syncStatus，页面必须整表回读才能拿到全字段
+    // POST /api/addresses 只回键 + syncStatus（页面不展示同步列，接口仍按契约下发）
     const afterCreate = await listAddresses(request, 'ACTIVE')
     const created = afterCreate.list.find((item) => item.label === label)
     expect(created, '新增地址应出现在 GET /api/addresses?status=ACTIVE 列表').toBeTruthy()
     expect(created.contact).toEqual({ name: '端到端收货人', phone: '13900001111' })
-    expect(created.regionCodes).toEqual(['530000', '530100', '530111'])
+    expect(created.regionCodes).toEqual(['530000', '530100', '530111', '53011110'])
     expect(created.regionText).toBe('云南省 昆明市 官渡区 矣六街道')
     expect(created.detail).toBe(detail)
     expect(created.status).toBe('ACTIVE')
@@ -100,7 +98,7 @@ test.describe('收货地址', () => {
     await expect(page.getByTestId('address-modal')).toBeVisible()
     await expect(page.getByTestId('address-label')).toHaveValue(label)
     await expect(page.getByTestId('address-contact-phone')).toHaveValue('13900001111')
-    await expect(page.getByTestId('address-region-codes')).toHaveValue('530000,530100,530111')
+    await expect(page.getByTestId('address-region-codes')).toHaveValue('530000,530100,530111,53011110')
     await page.getByTestId('address-detail').fill(updatedDetail)
     await page.getByTestId('address-save').click()
     await expect(page.getByTestId('toast')).toContainText('地址已更新')

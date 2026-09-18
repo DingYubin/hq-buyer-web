@@ -29,8 +29,53 @@ export const SYNC_STATUS_LABEL = {
 
 export const CART_ITEM_STATUS_LABEL = { NORMAL: '可结算', INVALID: '已失效', CONVERTED: '已转订单' }
 
-export const INQUIRY_COLUMNS = ['询价单号', '状态', '配件数', 'VIN', '车牌号', '报案号', '询价时间', '报价截止', '操作']
-export const ADDRESS_COLUMNS = ['收货人', '所在地区', '详细地址', '手机号', '固定号码', '同步状态', '操作']
+/** 造数用的车型快照：与后端 vehicleSnapshot 契约字段一致（发布门禁要求 carBrandId + carBrandName + model）。 */
+export const VEHICLE_MODEL = {
+  model: '530Li 领先型',
+  carBrandId: 'brand_bmw',
+  carBrandName: '宝马',
+  brandLogo: '',
+  saleModelCode: 'BMW530LI',
+  saleModelName: '530Li 领先型',
+  seriesId: 'series_bmw_5',
+  seriesZh: '宝马 5 系',
+  epcModelCode: 'EPC530LI',
+  energyType: '汽油',
+  carProduceYear: 2022,
+  locationId: 'loc_shenyang',
+  locationName: '华晨宝马',
+}
+
+/** 发布草稿需要的白名单快照（去掉只用于展示的 brandLogo / energyType / carProduceYear）。 */
+export const VEHICLE_SNAPSHOT = {
+  model: VEHICLE_MODEL.model,
+  carBrandId: VEHICLE_MODEL.carBrandId,
+  carBrandName: VEHICLE_MODEL.carBrandName,
+  saleModelCode: VEHICLE_MODEL.saleModelCode,
+  saleModelName: VEHICLE_MODEL.saleModelName,
+  seriesId: VEHICLE_MODEL.seriesId,
+  seriesZh: VEHICLE_MODEL.seriesZh,
+  epcModelCode: VEHICLE_MODEL.epcModelCode,
+  locationId: VEHICLE_MODEL.locationId,
+  locationName: VEHICLE_MODEL.locationName,
+}
+
+/**
+ * 存一条 VIN 档案，使「识别车型」在本地稳定返回 RECOGNIZED。
+ * 不依赖外部译码链路：GET /api/vehicles/vin/{vin} 先命中本组织 vin_records。
+ */
+export async function seedVinRecord(request, vin = randomVin()) {
+  await apiOk(request, '/api/vehicles/vin-records', {
+    method: 'POST',
+    headers: BUYER,
+    idempotencyKey: newKey(),
+    data: { vin, source: 'PC', vehicleModel: VEHICLE_MODEL },
+  })
+  return vin
+}
+
+export const INQUIRY_COLUMNS = ['询价单号', '车辆信息 / VIN', '车牌号', '报案号', '配件信息', '发布时间', '状态', '操作']
+export const ADDRESS_COLUMNS = ['收货人', '所在地区', '详细地址', '手机号', '固定号码', '操作']
 export const INQUIRY_TABS = ['全部', '待报价', '报价中', '已报价', '已下单', '已撤回/过期']
 export const ADDRESS_TABS = ['正常', '已停用', '全部']
 
@@ -164,12 +209,20 @@ export async function seedPublishedInquiry(request, overrides = {}) {
   })
   const draftId = draft.inquiryId || draft.draftId
 
+  // 发布门禁（42248）要求草稿带完整车型快照，与页面「识别车型」写入的是同一份字段。
+  const patched = await apiOk(request, `/api/inquiry-drafts/${draftId}`, {
+    method: 'PATCH',
+    headers: BUYER,
+    idempotencyKey: newKey(),
+    data: { version: draft.version, vehicleSnapshot: VEHICLE_SNAPSHOT },
+  })
+
   const saved = await apiOk(request, `/api/inquiry-drafts/${draftId}/items`, {
     method: 'PUT',
     headers: BUYER,
     idempotencyKey: newKey(),
     data: {
-      version: draft.version,
+      version: patched.version,
       items: [
         {
           requestId: `req_${compact().slice(0, 12)}`,
@@ -194,9 +247,10 @@ export async function seedPublishedInquiry(request, overrides = {}) {
       contact: CONTACT,
       publishOptions: {
         quotedType: 'SYSTEM',
+        isOpenInvoice: true,
         isAnonymous: true,
         noReplacement: false,
-        selectedChannelOrgIds: [],
+        storeIds: [],
       },
     },
   })
@@ -206,6 +260,7 @@ export async function seedPublishedInquiry(request, overrides = {}) {
     itemName,
     oeCode,
     quantity,
+    itemCount: 1, // seedPublishedInquiry 固定写入 1 行配件
     draftId,
     inquiryId: published.inquiryId,
     inquiryNo: published.inquiryNo,

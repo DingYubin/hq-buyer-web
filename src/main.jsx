@@ -73,7 +73,8 @@ function App() {
   )
 
   const topKey = route.path === 'order-confirm' ? 'cart' : route.path
-  const activeNav = NAV_ITEMS.some((item) => item.key === topKey) ? topKey : 'dashboard'
+  const visibleRoutes = new Set(['dashboard', 'publish', 'inquiries', 'quotation-result', 'cart', 'addresses'])
+  const activeNav = visibleRoutes.has(topKey) ? topKey : 'dashboard'
   const pageKey = `${route.path}?${route.params.toString()}`
 
   const renderPage = () => {

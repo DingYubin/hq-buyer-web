@@ -149,6 +149,16 @@ export default function CartPage({ cartId, onNavigate, onCartChange }) {
                 购物车版本 <b>v{state.cart.version}</b> · 状态 {state.cart.status}
               </span>
             </div>
+            <div className="cart-table-head" aria-hidden="true">
+              <span />
+              <span>配件名称</span>
+              <span>品质</span>
+              <span>单价</span>
+              <span>数量</span>
+              <span>小计</span>
+              <span>状态</span>
+              <span>操作</span>
+            </div>
             <div className="cart-items">
               {groups.map((group) => (
                 <div className="cart-group" key={group.supplierName} data-testid="cart-group">
@@ -171,12 +181,17 @@ export default function CartPage({ cartId, onNavigate, onCartChange }) {
                             setChecked((prev) => ({ ...prev, [row.cartItemId]: event.target.checked }))
                           }
                         />
-                        <div className="cart-thumb">
-                          <ShoppingCart size={18} />
+                        <div className="cart-product">
+                          <div className="cart-thumb" aria-hidden="true">
+                            <ShoppingCart size={16} />
+                          </div>
+                          <div className="cart-info">
+                            <b>{row.partName}</b>
+                            <span>OE {row.oeNo || '—'}</span>
+                          </div>
                         </div>
-                        <div className="cart-info">
-                          <b>{row.partName}</b>
-                          <span>OE {row.oeNo || '—'} · {row.qualityName}</span>
+                        <div className="cart-quality">
+                          <span>{row.qualityName || '—'}</span>
                           {disabled && (
                             <small className="danger-link">
                               {invalidReasonText(row.invalidReason || issue?.reason, issue?.message)}
@@ -188,7 +203,7 @@ export default function CartPage({ cartId, onNavigate, onCartChange }) {
                         <div className="cart-price" data-testid="cart-row-amount">
                           {money(row.amount)}
                         </div>
-                        <Status tone={status.tone}>{status.label}</Status>
+                        {disabled && <span className="cart-status-note">{status.label}</span>}
                         <button
                           className="remove-btn danger-link"
                           data-testid="cart-remove"
@@ -214,18 +229,13 @@ export default function CartPage({ cartId, onNavigate, onCartChange }) {
           <aside>
             <Card className="checkout-card">
               <h3>结算摘要</h3>
-              <div className="summary-line">
-                <span>已选件数</span>
-                <b data-testid="cart-checked-count">{checkedRows.length}</b>
+              <div className="cart-selection-summary">
+                <span>已选 <b data-testid="cart-checked-count">{checkedRows.length}</b> 件，合计</span>
+                <strong data-testid="cart-checked-total">{money(checkedTotal)}</strong>
               </div>
-              <div className="summary-line">
-                <span>已选金额</span>
-                <b>{money(checkedTotal)}</b>
-              </div>
-              <div className="summary-line total">
-                <span>预计合计</span>
-                <b data-testid="cart-checked-total">{money(checkedTotal)}</b>
-              </div>
+              <Button variant="ghost" onClick={clearCart} disabled={busy} data-testid="cart-clear-bottom">
+                清空购物车
+              </Button>
               <Button disabled={!checkedIds.length || busy} onClick={checkout} data-testid="cart-checkout">
                 去结算 <ChevronRight size={16} />
               </Button>

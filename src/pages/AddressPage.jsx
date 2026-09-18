@@ -3,13 +3,12 @@
 // 写入：POST 新增（只回键 + syncStatus，必须整表回读）/ PATCH 编辑（必带 version）
 //      POST {id}/default 设为默认 / DELETE ?version= 删除或降级停用 / POST {id}/sync 重试同步
 // 关键口径：列表行自带 version 与 syncStatus；冲突 40911 一律先刷新再让用户重试。
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { MapPin, Plus, RefreshCw, Store, TriangleAlert } from 'lucide-react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { MapPin, Plus, Store, TriangleAlert } from 'lucide-react'
 import { api } from '../api/client'
-import { addressStatusMeta, formatDateTime, syncStatusMeta } from '../lib/format'
 import { Button, Card, Empty, ErrorBox, Field, Modal, PageHead, Pager, Status, errorText, useToast } from '../components/ui'
 
-const PAGE_SIZE = 10
+const PAGE_SIZE = 5
 const PHONE_RE = /^1[3-9]\d{9}$/
 const CODE_RE = /^\d{4,12}$/
 
@@ -100,14 +99,6 @@ export default function AddressPage({ onNavigate }) {
     load()
   }, [load])
 
-  const syncCounts = useMemo(() => {
-    const counts = { SYNCED: 0, SYNC_PENDING: 0, SYNC_FAILED: 0 }
-    state.list.forEach((row) => {
-      if (counts[row.syncStatus] !== undefined) counts[row.syncStatus] += 1
-    })
-    return counts
-  }, [state.list])
-
   const openCreate = () => {
     setForm(EMPTY_FORM)
     setFormErrors({})
@@ -143,13 +134,13 @@ export default function AddressPage({ onNavigate }) {
     try {
       if (!editing.addressId) {
         await api.createAddress({ ...payload, isDefault: Boolean(form.isDefault) })
-        notify('地址已保存，正在同步到华汽侧')
+        notify('地址已保存')
       } else {
         const body = { ...payload, version: editing.version }
         // 取消默认只能由其它地址设为默认，传 false 服务端不生效，这里只在勾选时提交。
         if (form.isDefault && !editing.wasDefault) body.isDefault = true
         await api.updateAddress(editing.addressId, body)
-        notify('地址已更新，已重新进入同步')
+        notify('地址已更新')
       }
       closeModal()
       await load() // 新增只回键、编辑不回列表全量 → 统一整表回读
@@ -193,20 +184,6 @@ export default function AddressPage({ onNavigate }) {
     }
   }
 
-  const retrySync = async (row) => {
-    setBusy(true)
-    try {
-      const result = await api.triggerAddressSync(row.addressId, { mode: 'RETRY', version: row.version })
-      notify(result.syncStatus === 'SYNCED' ? '已同步到华汽侧' : '已重新进入同步队列')
-      await load()
-    } catch (error) {
-      notify(errorText(error))
-      if (error?.code === 40911) await load()
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const change = (key) => (event) =>
     setForm((prev) => ({
       ...prev,
@@ -218,7 +195,7 @@ export default function AddressPage({ onNavigate }) {
       <PageHead
         eyebrow="首页 / 收货地址"
         title="收货地址"
-        description="管理询价和订单使用的收货信息，地址会同步到华汽侧。"
+        description="管理询价和订单使用的收货信息，默认地址会优先用于发布询价和确认订单。"
         action={
           <Button onClick={openCreate} data-testid="address-create">
             <Plus size={17} />
@@ -229,30 +206,27 @@ export default function AddressPage({ onNavigate }) {
       <ErrorBox error={state.error} onRetry={load} />
       <div className="address-layout">
         <div>
-          <div className="tabs-row">
-            <div className="tabs" data-testid="address-tabs">
-              {TABS.map((item) => (
-                <button
-                  key={item.key}
-                  data-testid={`address-tab-${item.key}`}
-                  className={tab === item.key ? 'active' : ''}
-                  onClick={() => {
-                    setTab(item.key)
-                    setPageNum(1)
-                  }}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-            <button className="link-btn" onClick={() => onNavigate('publish')} data-testid="address-back-publish">
-              返回发布询价
-            </button>
-          </div>
-          <Card className="table-card">
-            <div className="card-head" data-testid="address-count">
-              已保存 <b>{state.total}</b> 条地址
-              <small>共 {state.total} 条，每页 {PAGE_SIZE} 条</small>
+          <Card className="table-card address-table-card">
+            <div className="card-head address-card-head" data-testid="address-count">
+              <span>已保存 <b>{state.total}</b> 条地址</span>
+              <div className="tabs address-status-tabs" data-testid="address-tabs">
+                {TABS.map((item) => (
+                  <button
+                    key={item.key}
+                    data-testid={`address-tab-${item.key}`}
+                    className={tab === item.key ? 'active' : ''}
+                    onClick={() => {
+                      setTab(item.key)
+                      setPageNum(1)
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+              <button className="link-btn" onClick={() => onNavigate('publish')} data-testid="address-back-publish">
+                返回发布询价
+              </button>
             </div>
             <div className="table-scroll">
               <table data-testid="address-table">
@@ -263,14 +237,11 @@ export default function AddressPage({ onNavigate }) {
                     <th>详细地址</th>
                     <th>手机号</th>
                     <th>固定号码</th>
-                    <th>同步状态</th>
                     <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {state.list.map((row) => {
-                    const sync = syncStatusMeta(row.syncStatus)
-                    const status = addressStatusMeta(row.status)
                     return (
                       <tr
                         key={row.addressId}
@@ -281,7 +252,7 @@ export default function AddressPage({ onNavigate }) {
                         <td>
                           <b>{row.label}</b>
                           <small>
-                            {row.contact?.name} · {status.label}
+                            {row.contact?.name}
                           </small>
                           {row.isDefault && <em className="badge">默认地址</em>}
                         </td>
@@ -289,10 +260,6 @@ export default function AddressPage({ onNavigate }) {
                         <td>{row.detail}</td>
                         <td>{row.contact?.phone}</td>
                         <td>{row.tel || '—'}</td>
-                        <td>
-                          <Status tone={sync.tone}>{sync.label}</Status>
-                          <small>更新于 {formatDateTime(row.updatedAt)}</small>
-                        </td>
                         <td>
                           <div className="row-actions">
                             {!row.isDefault && row.status === 'ACTIVE' && (
@@ -312,11 +279,6 @@ export default function AddressPage({ onNavigate }) {
                                 删除
                               </button>
                             )}
-                            {row.syncStatus === 'SYNC_FAILED' && (
-                              <button data-testid="address-sync-retry" disabled={busy} onClick={() => retrySync(row)}>
-                                <RefreshCw size={12} /> 重试同步
-                              </button>
-                            )}
                           </div>
                         </td>
                       </tr>
@@ -324,7 +286,7 @@ export default function AddressPage({ onNavigate }) {
                   })}
                   {!state.loading && state.list.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="empty">
+                      <td colSpan={6} className="empty">
                         <Empty
                           icon={<MapPin size={30} />}
                           title="暂无收货地址"
@@ -340,7 +302,7 @@ export default function AddressPage({ onNavigate }) {
                   )}
                   {state.loading && (
                     <tr>
-                      <td colSpan={7} className="empty">
+                      <td colSpan={6} className="empty">
                         加载中…
                       </td>
                     </tr>
@@ -362,20 +324,8 @@ export default function AddressPage({ onNavigate }) {
             <TriangleAlert size={16} />
           </div>
           <b>地址信息不准可能影响报价</b>
-          <p>地区与详细地址会随单据同步到华汽侧；同步失败不影响本地下单，可手动重试。</p>
-          <div className="sync-row">
-            <span>已同步</span>
-            <strong data-testid="sync-synced">{syncCounts.SYNCED}</strong>
-          </div>
-          <div className="sync-row">
-            <span>同步中</span>
-            <strong>{syncCounts.SYNC_PENDING}</strong>
-          </div>
-          <div className="sync-row">
-            <span>同步失败</span>
-            <strong>{syncCounts.SYNC_FAILED}</strong>
-          </div>
-          <small>统计为本页数据；地区级联字典接口（geo_nodes）当前为空，地区名称需前端手填。</small>
+          <p>地区与详细地址会用于发布询价和确认订单，请确认收货信息准确。</p>
+          <small>地区级联字典接口（geo_nodes）当前为空，地区名称需前端手填。</small>
         </aside>
       </div>
 
@@ -383,7 +333,7 @@ export default function AddressPage({ onNavigate }) {
         <Modal
           testId="address-modal"
           title={editing.addressId ? '编辑收货地址' : '新增收货地址'}
-          description="保存后地址会立即生效，并自动创建同步任务。"
+          description="保存后地址会立即生效，可用于发布询价和确认订单。"
           onClose={closeModal}
           footer={
             <>

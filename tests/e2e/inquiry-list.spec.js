@@ -30,7 +30,7 @@ test.describe('询价单列表', () => {
     await requireBackend(request)
   })
 
-  test('列表：7 列表头、6 个页签筛选参数与行数、分页文案都取自接口', async ({ page, request }) => {
+  test('列表：8 列表头、6 个页签筛选参数与行数、分页文案都取自接口', async ({ page, request }) => {
     await openPage(page, 'inquiries')
 
     await expect(page.getByTestId('inquiry-table').locator('thead th')).toHaveText(INQUIRY_COLUMNS)
@@ -93,9 +93,13 @@ test.describe('询价单列表', () => {
     const row = rows.first()
     await expect(row).toHaveAttribute('data-inquiry-id', quote.inquiryId)
     await expect(row.locator('td').nth(0)).toContainText(quote.inquiryNo)
-    await expect(row.locator('td').nth(1)).toContainText(INQUIRY_STATUS_LABEL.QUOTED)
-    await expect(row.locator('td').nth(2)).toHaveText(String(quote.quantity))
-    await expect(row.locator('td').nth(3)).toHaveText(maskedVin(quote.vin))
+    await expect(row.locator('td').nth(1)).toContainText(maskedVin(quote.vin))
+    await expect(row.locator('td').nth(2)).toHaveText('—')
+    await expect(row.locator('td').nth(3)).toHaveText('—')
+    // 列表契约里配件信息列只有 itemCount（明细名要另拉 items，属待确认缺口），页面按契约渲染件数。
+    await expect(row.locator('td').nth(4)).toHaveText(`${quote.itemCount} 项配件`)
+    await expect(row.locator('td').nth(5)).toHaveText(/\d{4}-\d{2}-\d{2}/)
+    await expect(row.locator('td').nth(6)).toContainText(INQUIRY_STATUS_LABEL.QUOTED)
 
     // 行内按钮 → 报价结果页（hash 路由带 inquiryId）
     await row.getByRole('button', { name: '查看报价' }).click()

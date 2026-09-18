@@ -29,7 +29,9 @@ test.describe('报价结果页', () => {
       /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$|^—$/,
     )
 
-    // 报价分组：按需求项分组，组内展示商家别名、品质/交期/有效期、单价
+    // 默认视图是「按商家比较」（契约 groupBy 默认 SUPPLIER），切到「按配件比较」看分组
+    await page.getByTestId('tab-by-part').click()
+    await expect(page.getByTestId('tab-by-part')).toHaveClass(/active/)
     await expect(page.getByTestId('quote-group')).toHaveCount(1)
     await expect(page.getByTestId('quote-part-name')).toHaveText(quote.itemName)
     const row = page.getByTestId('quote-row')

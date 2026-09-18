@@ -97,13 +97,13 @@ test.describe('购物车', () => {
 
     // 取消确认 → 不发请求
     page.once('dialog', (dialog) => dialog.dismiss())
-    await page.getByTestId('cart-clear').click()
+    await page.getByTestId('cart-clear-bottom').click()
     await expect(page.getByTestId('cart-row')).toHaveCount(1)
 
     // 确认清空 → POST /carts/{id}/clear
     await waitToastGone(page)
     page.once('dialog', (dialog) => dialog.accept())
-    await page.getByTestId('cart-clear').click()
+    await page.getByTestId('cart-clear-bottom').click()
     await expect(page.getByTestId('toast')).toContainText('购物车已清空')
     await expect(page.getByTestId('cart-row')).toHaveCount(0)
     await expect(page.getByTestId('cart-checked-count')).toHaveText('0')

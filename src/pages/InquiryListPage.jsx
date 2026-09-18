@@ -88,9 +88,9 @@ export default function InquiryListPage({ onNavigate, keyword = '', highlight })
   return (
     <>
       <PageHead
-        eyebrow="采购中心 / 我的询价单"
-        title="我的询价单"
-        description="查看询价进度，报价回来后进入报价结果页选购配件。"
+        eyebrow="首页 / 查看报价"
+        title="查看报价"
+        description="先选择询价单，再查看供应商报价和配件价格对比。"
         action={
           <Button onClick={() => onNavigate('publish')} data-testid="to-publish">
             <FilePlus2 size={17} />
@@ -99,46 +99,49 @@ export default function InquiryListPage({ onNavigate, keyword = '', highlight })
         }
       />
       <ErrorBox error={state.error} onRetry={load} />
-      <div className="tabs-row">
-        <div className="tabs" data-testid="inquiry-tabs">
-          {TABS.map((item) => (
-            <button
-              key={item.key}
-              data-testid={`inquiry-tab-${item.key}`}
-              className={tab === item.key ? 'active' : ''}
-              onClick={() => switchTab(item.key)}
-            >
-              {item.label}
+      <Card className="table-card inquiry-card">
+        <div className="card-head inquiry-card-head">
+          <h3>我的询价单</h3>
+          <span>共 {state.total} 条记录</span>
+        </div>
+        <div className="inquiry-filter-row">
+          <div className="tabs" data-testid="inquiry-tabs">
+            {TABS.map((item) => (
+              <button
+                key={item.key}
+                data-testid={`inquiry-tab-${item.key}`}
+                className={tab === item.key ? 'active' : ''}
+                onClick={() => switchTab(item.key)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <div className="table-search">
+            <Search size={15} />
+            <input
+              data-testid="inquiry-search"
+              value={search}
+              placeholder="输入车牌号后四位 / 报案号后四位"
+              onChange={(event) => setSearch(event.target.value)}
+              onKeyDown={(event) => event.key === 'Enter' && submitSearch()}
+            />
+            <button className="link-btn" onClick={submitSearch}>
+              查询
             </button>
-          ))}
+          </div>
         </div>
-        <div className="table-search">
-          <Search size={15} />
-          <input
-            data-testid="inquiry-search"
-            value={search}
-            placeholder="输入询价单号精确查询"
-            onChange={(event) => setSearch(event.target.value)}
-            onKeyDown={(event) => event.key === 'Enter' && submitSearch()}
-          />
-          <button className="link-btn" onClick={submitSearch}>
-            查询
-          </button>
-        </div>
-      </div>
-      <Card className="table-card">
         <div className="table-scroll">
           <table data-testid="inquiry-table">
             <thead>
               <tr>
                 <th>询价单号</th>
-                <th>状态</th>
-                <th>配件数</th>
-                <th>VIN</th>
+                <th>车辆信息 / VIN</th>
                 <th>车牌号</th>
                 <th>报案号</th>
-                <th>询价时间</th>
-                <th>报价截止</th>
+                <th>配件信息</th>
+                <th>发布时间</th>
+                <th>状态</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -153,18 +156,19 @@ export default function InquiryListPage({ onNavigate, keyword = '', highlight })
                     className={highlight === row.inquiryId ? 'row-highlight' : ''}
                   >
                     <td>
-                      <b>{row.inquiryNo}</b>
-                      <small>{row.source}</small>
+                      <b className="link-text">{row.inquiryNo}</b>
                     </td>
+                    <td>
+                      <b>{row.vehicleModel || row.carModel || row.vehicleName || '车辆信息待补充'}</b>
+                      <small>{row.vinMasked || row.vin || '—'}</small>
+                    </td>
+                    <td>{row.plateNo || '—'}</td>
+                    <td>{row.claimNo || '—'}</td>
+                    <td>{row.itemSummary || `${row.itemCount || 0} 项配件`}</td>
+                    <td>{formatDateTime(row.createdAt)}</td>
                     <td>
                       <Status tone={meta.tone}>{meta.label}</Status>
                     </td>
-                    <td>{row.itemCount}</td>
-                    <td>{row.vinMasked || '—'}</td>
-                    <td>{row.plateNo || '—'}</td>
-                    <td>{row.claimNo || '—'}</td>
-                    <td>{formatDateTime(row.createdAt)}</td>
-                    <td>{formatDateTime(row.quoteDeadlineAt)}</td>
                     <td>
                       <div className="row-actions">
                         <button onClick={() => onNavigate(`quotation-result?inquiryId=${row.inquiryId}`)}>
@@ -189,14 +193,14 @@ export default function InquiryListPage({ onNavigate, keyword = '', highlight })
               })}
               {!state.loading && state.list.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="empty">
+                  <td colSpan={8} className="empty">
                     <Empty title="没有符合条件的询价单" description="换个状态或先发布一个询价" />
                   </td>
                 </tr>
               )}
               {state.loading && (
                 <tr>
-                  <td colSpan={9} className="empty">
+                  <td colSpan={8} className="empty">
                     加载中…
                   </td>
                 </tr>

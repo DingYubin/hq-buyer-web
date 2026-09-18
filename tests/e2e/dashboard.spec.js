@@ -23,7 +23,7 @@ test.describe('工作台', () => {
     await openPage(page, 'dashboard')
 
     await expect(page.getByTestId('stat-active')).toContainText(String(active.total))
-    await expect(page.getByTestId('stat-active')).toContainText('进行中询价')
+    await expect(page.getByTestId('stat-active')).toContainText('待处理询价')
     await expect(page.getByTestId('stat-quoted')).toContainText(String(quoted.total))
     await expect(page.getByTestId('stat-cart')).toContainText(String(carts.list[0]?.itemCount ?? 0))
     // 订单列表接口尚未开放：卡片固定展示占位符，不允许前端臆造数据
@@ -41,7 +41,7 @@ test.describe('工作台', () => {
     await expect(page).toHaveURL(/#\/publish$/)
   })
 
-  test('左侧导航与购物车角标：角标 = ACTIVE 购物车行数合计', async ({ page, request }) => {
+  test('外壳导航：购物车角标取 ACTIVE 行数合计，顶栏用户菜单可进收货地址', async ({ page, request }) => {
     const carts = await apiOk(request, '/api/carts?status=ACTIVE&pageNum=1&pageSize=5')
     let expected = 0
     for (const cart of carts.list || []) {
@@ -56,7 +56,10 @@ test.describe('工作台', () => {
       await expect(page.getByTestId('nav-cart-badge')).toHaveCount(0)
     }
 
-    await page.getByTestId('nav-addresses').click()
+    // 收货地址不在六项侧栏里（原型如此），入口在顶栏用户菜单「收货地址管理」。
+    await page.getByTestId('user-chip').click()
+    await expect(page.getByTestId('user-menu')).toBeVisible()
+    await page.getByTestId('user-menu-addresses').click()
     await expect(page).toHaveURL(/#\/addresses$/)
     await expect(page.getByTestId('address-table')).toBeVisible()
   })

@@ -1,6 +1,6 @@
 // 发布询价（buyer-publish.html）：原型是单页表单 ——
 // 车辆信息（VIN + 识别车型）→ 车牌号/报案号 → 录入配件信息（宽表格）→
-// 品质要求（按整单批量设品质）→ 其他要求 → 联系方式（收货地址）→ 发布询价。
+// 品质要求（按整单批量设品质）→ 其他要求（开票 / 平台推荐）→ 联系方式（收货地址）→ 发布询价。
 // 写入链路：POST /api/inquiry-drafts（含配件）→ PATCH 草稿 → PUT 草稿配件 → POST /api/inquiries
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
@@ -18,6 +18,38 @@ const EMPTY_ITEM = () => ({
 
 const VIN_ERROR = 'VIN 需为 17 位大写字母数字，且不含 I/O/Q'
 
+/**
+ * 识别成功后写入草稿的车型快照白名单（与后端 vehicleSnapshot Joi 契约逐字段对齐）。
+ * 识别接口还会回 brandLogo / energyType / carProduceYear 等展示字段，
+ * 这些字段不在草稿契约内，必须过滤后再 PATCH，否则整次写入被判 400。
+ */
+const VEHICLE_SNAPSHOT_KEYS = [
+  'model',
+  'carBrandId',
+  'carBrandName',
+  'saleModelCode',
+  'saleModelName',
+  'seriesId',
+  'seriesZh',
+  'seriesEn',
+  'epcModelCode',
+  'locationId',
+  'locationName',
+  'vehicleType',
+  'engineType',
+]
+
+/** 发布门禁要求草稿带完整车型快照（carBrandId + carBrandName + model），未识别时不写脏数据。 */
+export function toVehicleSnapshot(vehicleModel) {
+  if (!vehicleModel) return null
+  const snapshot = {}
+  VEHICLE_SNAPSHOT_KEYS.forEach((key) => {
+    const value = vehicleModel[key]
+    if (typeof value === 'string' && value.trim()) snapshot[key] = value.trim()
+  })
+  return Object.keys(snapshot).length ? snapshot : null
+}
+
 export default function PublishInquiryPage({ onNavigate, draftId }) {
   const notify = useToast()
   const [qualities, setQualities] = useState([])
@@ -26,10 +58,11 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
   const [plateNo, setPlateNo] = useState('')
   const [claimNo, setClaimNo] = useState('')
   const [recognized, setRecognized] = useState(null)
+  const [snapshot, setSnapshot] = useState(null)
   const [items, setItems] = useState([{ ...EMPTY_ITEM(), name: '前保险杠', oeCode: '51117379491', quantity: 1 }])
   const [contact, setContact] = useState({ name: '', phone: '' })
   const [addresses, setAddresses] = useState({ list: [], selected: '' })
-  const [options, setOptions] = useState({ isAnonymous: true, noReplacement: false })
+  const [options, setOptions] = useState({ isAnonymous: true, noReplacement: false, isOpenInvoice: true })
   const [busy, setBusy] = useState('')
   const [error, setError] = useState(null)
   /** 服务端最近一次落库的内容签名：内容未变时不重复写，避免空推 version。 */
@@ -78,6 +111,8 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
     try {
       const data = await api.recognizeVin(vin)
       setRecognized(data)
+      // 识别成功即拿到可发布车型：写进快照，发布时随草稿一起提交（发布门禁 42248）。
+      setSnapshot(data.recognizeStatus === 'RECOGNIZED' ? toVehicleSnapshot(data.vehicleModel) : null)
       notify(data.recognizeStatus === 'RECOGNIZED' ? '车型识别成功' : '未匹配到识别记录，可直接手动填写')
     } catch (err) {
       setError(err)
@@ -121,12 +156,14 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
         claimNo: claimNo.trim(),
         contactName: contact.name.trim(),
         contactPhone: contact.phone.trim(),
+        snapshot,
       })
       const itemsSig = JSON.stringify(payloadItems)
       if (!draft?.draftId) {
         const created = await api.createDraft({
           source: 'PC',
           vin,
+          ...(snapshot ? { vehicleSnapshot: snapshot } : {}),
           ...(plateNo.trim() ? { plateNo: plateNo.trim() } : {}),
           ...(claimNo.trim() ? { claimNo: claimNo.trim() } : {}),
           items: payloadItems,
@@ -141,6 +178,7 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
         const patched = await api.patchDraft(current.draftId, {
           version: current.version,
           vin,
+          ...(snapshot ? { vehicleSnapshot: snapshot } : {}),
           plateNo: plateNo.trim() || null,
           claimNo: claimNo.trim() || null,
         })
@@ -156,7 +194,7 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
       }
       return current
     },
-    [claimNo, contact.name, contact.phone, draft, itemPayload, plateNo, vin, vinValid, notify],
+    [claimNo, contact.name, contact.phone, draft, itemPayload, plateNo, snapshot, vin, vinValid, notify],
   )
 
   const saveDraft = async () => {
@@ -188,11 +226,16 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
         draftId: current.draftId,
         version: current.version,
         contact: { name: contact.name.trim(), phone: contact.phone.trim() },
+        // 收货地址只传 ID，地区码 / 经纬度由服务端按地址快照展开（契约：buyer-publish.html）
+        ...(addresses.selected ? { addressId: addresses.selected } : {}),
         publishOptions: {
           quotedType: 'SYSTEM',
+          // Q3 冻结：前端必传开票意图，服务端派生上游 openInvoiceType / requireItemInvoice
+          isOpenInvoice: options.isOpenInvoice,
           isAnonymous: options.isAnonymous,
           noReplacement: options.noReplacement,
-          selectedChannelOrgIds: [],
+          // 平台推荐（SYSTEM）下店铺值会被上游忽略，按契约固定空数组
+          storeIds: [],
         },
       })
       notify(`询价已发布：${result.inquiryNo}`)
@@ -405,18 +448,34 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
           <h3 className="section-title" style={{ marginTop: 26 }}>
             其他要求
           </h3>
-          <div className="option-group">
+          <div className="option-group" data-testid="publish-invoice">
             <label>
-              <input type="radio" name="invoice" disabled /> 不需要发票
+              <input
+                type="radio"
+                name="invoice"
+                data-testid="option-invoice-none"
+                checked={!options.isOpenInvoice}
+                onChange={() => setOptions({ ...options, isOpenInvoice: false })}
+              />{' '}
+              不需要发票
             </label>
             <label>
-              <input type="radio" name="invoice" disabled defaultChecked /> 需要发票
+              <input
+                type="radio"
+                name="invoice"
+                data-testid="option-invoice-open"
+                checked={options.isOpenInvoice}
+                onChange={() => setOptions({ ...options, isOpenInvoice: true })}
+              />{' '}
+              需要发票
             </label>
             <label>
-              <input type="radio" name="seller" disabled defaultChecked /> 平台推荐
+              <input type="radio" name="seller" defaultChecked readOnly /> 平台推荐
             </label>
           </div>
-          <small className="field-hint">发票与推荐方式尚未纳入本期发布契约，接口补充后开放。</small>
+          <small className="field-hint">
+            开票选择随 publishOptions.isOpenInvoice 提交；「指定商家」需先有可报价供应商（storeIds），待接口开放后启用。
+          </small>
 
           <h3 className="section-title" style={{ marginTop: 26 }}>
             联系方式
@@ -450,11 +509,11 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
                 {!addresses.list.length && <option value="">暂无收货地址，请先新增</option>}
                 {addresses.list.map((row) => (
                   <option key={row.addressId} value={row.addressId}>
-                    {`${row.receiverName} ${row.receiverPhone} ${row.regionText || ''} ${row.detail || ''}`.trim()}
+                    {`${row.contact?.name || ''} ${row.contact?.phone || ''} ${row.regionText || ''} ${row.detail || ''}`.trim()}
                   </option>
                 ))}
               </select>
-              <a className="manage-address" onClick={() => onNavigate('address')}>
+              <a className="manage-address" onClick={() => onNavigate('addresses')}>
                 管理收货地址
               </a>
             </label>

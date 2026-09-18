@@ -50,7 +50,9 @@ export function inquiryStatusMeta(status) {
 /** 报价行库存状态。 */
 export const STOCK_STATUS = {
   AVAILABLE: { label: '现货', tone: 'green' },
+  IN_STOCK: { label: '现货', tone: 'green' },
   PARTIAL: { label: '部分现货', tone: 'orange' },
+  TRANSFER: { label: '调货', tone: 'orange' },
   OUT_OF_STOCK: { label: '缺货', tone: 'gray' },
 }
 

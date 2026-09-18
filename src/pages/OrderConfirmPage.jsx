@@ -5,7 +5,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircle2, ChevronRight, FileText, MapPin, Truck } from 'lucide-react'
 import { api } from '../api/client'
-import { amount, formatDateTime, syncStatusMeta } from '../lib/format'
+import { amount, formatDateTime } from '../lib/format'
 import { Button, Card, Empty, ErrorBox, Field, PageHead, Status, errorText, useToast } from '../components/ui'
 
 const money = (value) => (value === null || value === undefined ? '—' : `¥${amount(value)}`)
@@ -252,7 +252,6 @@ export default function OrderConfirmPage({ cartId, cartItemIds = [], onNavigate 
           <small>默认选中默认地址，切换后重新计算运费与金额。</small>
           <div className="address-list">
             {addresses.slice(0, 3).map((row) => {
-              const sync = syncStatusMeta(row.syncStatus)
               return (
                 <label
                   className={`address-option ${row.addressId === addressId ? 'active' : ''}`}
@@ -278,7 +277,6 @@ export default function OrderConfirmPage({ cartId, cartItemIds = [], onNavigate 
                       {row.regionText} {row.detail}
                     </small>
                   </div>
-                  <Status tone={sync.tone}>{sync.label}</Status>
                 </label>
               )
             })}
