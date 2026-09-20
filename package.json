@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test:e2e": "playwright test",
-    "test:e2e:headed": "playwright test --headed"
+    "test:e2e:headed": "playwright test --headed",
+    "test:publish": "playwright test --config playwright.publish.config.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",

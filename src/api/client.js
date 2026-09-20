@@ -178,6 +178,7 @@ export const api = {
     request('/users/me/invoice-default', { method: 'PUT', body, idempotencyKey: key }),
 
   // ---------- 收货地址（buyer-address.html） ----------
+  listRegions: (parentCode) => request('/regions', { params: { parentCode } }),
   listAddresses: (params) => request('/addresses', { params }),
   createAddress: (body, key = newIdempotencyKey()) =>
     request('/addresses', { method: 'POST', body, idempotencyKey: key }),

@@ -4,8 +4,9 @@
 // 写入链路：POST /api/inquiry-drafts（含配件）→ PATCH 草稿 → PUT 草稿配件 → POST /api/inquiries
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
+import { contactFromAddress, isPublishableVehicle, toDraftItems, toPublishInput, toVehicleSnapshot } from './publishInquiryPayload'
 import { api, newIdempotencyKey } from '../api/client'
-import { Button, Card, ErrorBox, PageHead, useToast } from '../components/ui'
+import { Button, Card, ErrorBox, useToast } from '../components/ui'
 
 const EMPTY_ITEM = () => ({
   requestId: `req_${newIdempotencyKey().slice(0, 8)}`,
@@ -18,38 +19,6 @@ const EMPTY_ITEM = () => ({
 
 const VIN_ERROR = 'VIN 需为 17 位大写字母数字，且不含 I/O/Q'
 
-/**
- * 识别成功后写入草稿的车型快照白名单（与后端 vehicleSnapshot Joi 契约逐字段对齐）。
- * 识别接口还会回 brandLogo / energyType / carProduceYear 等展示字段，
- * 这些字段不在草稿契约内，必须过滤后再 PATCH，否则整次写入被判 400。
- */
-const VEHICLE_SNAPSHOT_KEYS = [
-  'model',
-  'carBrandId',
-  'carBrandName',
-  'saleModelCode',
-  'saleModelName',
-  'seriesId',
-  'seriesZh',
-  'seriesEn',
-  'epcModelCode',
-  'locationId',
-  'locationName',
-  'vehicleType',
-  'engineType',
-]
-
-/** 发布门禁要求草稿带完整车型快照（carBrandId + carBrandName + model），未识别时不写脏数据。 */
-export function toVehicleSnapshot(vehicleModel) {
-  if (!vehicleModel) return null
-  const snapshot = {}
-  VEHICLE_SNAPSHOT_KEYS.forEach((key) => {
-    const value = vehicleModel[key]
-    if (typeof value === 'string' && value.trim()) snapshot[key] = value.trim()
-  })
-  return Object.keys(snapshot).length ? snapshot : null
-}
-
 export default function PublishInquiryPage({ onNavigate, draftId }) {
   const notify = useToast()
   const [qualities, setQualities] = useState([])
@@ -59,12 +28,16 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
   const [claimNo, setClaimNo] = useState('')
   const [recognized, setRecognized] = useState(null)
   const [snapshot, setSnapshot] = useState(null)
-  const [items, setItems] = useState([{ ...EMPTY_ITEM(), name: '前保险杠', oeCode: '51117379491', quantity: 1 }])
-  const [contact, setContact] = useState({ name: '', phone: '' })
+  const [items, setItems] = useState(() => Array.from({ length: 4 }, (_, index) => ({ ...EMPTY_ITEM(), quantity: index === 0 ? 1 : '' })))
   const [addresses, setAddresses] = useState({ list: [], selected: '' })
-  const [options, setOptions] = useState({ isAnonymous: true, noReplacement: false, isOpenInvoice: true })
+  const [isOpenInvoice, setIsOpenInvoice] = useState(true)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState(null)
+  const [addressError, setAddressError] = useState(null)
+  const [recognizing, setRecognizing] = useState(false)
+  const vinRef = useRef('')
+  const recognitionRef = useRef({ vin: '', sequence: 0 })
+  const submitLock = useRef(false)
   /** 服务端最近一次落库的内容签名：内容未变时不重复写，避免空推 version。 */
   const savedRef = useRef({ form: null, items: null })
 
@@ -83,57 +56,65 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
 
   useEffect(() => {
     api
-      .listAddresses({ pageNum: 1, pageSize: 50 })
+      .listAddresses({ status: 'ACTIVE', pageNum: 1, pageSize: 100 })
       .then((data) => {
         const list = data.list || []
         const preferred = list.find((row) => row.isDefault) || list[0]
         setAddresses({ list, selected: preferred ? preferred.addressId : '' })
       })
-      .catch(() => setAddresses({ list: [], selected: '' }))
+      .catch((err) => {
+        setAddressError(err)
+        setAddresses({ list: [], selected: '' })
+      })
   }, [])
 
-  const qualityLabel = useCallback(
-    (code) => qualities.find((quality) => quality.code === code)?.name || code,
-    [qualities],
-  )
-
   const vinValid = useMemo(() => /^[A-HJ-NPR-Z0-9]{17}$/.test(vin), [vin])
-  const filledItems = useMemo(() => items.filter((item) => item.name.trim()), [items])
-  /** 品质要求「按整单选品质」：勾选后批量应用到所有配件行，行内仍可单独调整。 */
+  /** 品质要求「按整单选品质」：勾选后批量应用到所有配件行。 */
   const batchQualities = useMemo(() => items[0]?.qualityCodes || [], [items])
 
   const recognize = async () => {
-    if (!vinValid) {
-      notify(VIN_ERROR)
+    const currentVin = vinRef.current
+    if (!/^[A-HJ-NPR-Z0-9]{17}$/.test(currentVin)) {
+      if (currentVin) notify(VIN_ERROR)
       return
     }
+    // onBlur + Enter/点击共用同一个识别，避免重复查询；失败可重试。
+    if (recognitionRef.current.vin === currentVin) return
+    const sequence = recognitionRef.current.sequence + 1
+    recognitionRef.current = { vin: currentVin, sequence }
+    setRecognizing(true)
     setError(null)
     try {
-      const data = await api.recognizeVin(vin)
+      const data = await api.recognizeVin(currentVin)
+      if (vinRef.current !== currentVin || recognitionRef.current.sequence !== sequence) return
+      const next = data.recognizeStatus === 'RECOGNIZED' ? toVehicleSnapshot(data.vehicleModel) : null
       setRecognized(data)
-      // 识别成功即拿到可发布车型：写进快照，发布时随草稿一起提交（发布门禁 42248）。
-      setSnapshot(data.recognizeStatus === 'RECOGNIZED' ? toVehicleSnapshot(data.vehicleModel) : null)
-      notify(data.recognizeStatus === 'RECOGNIZED' ? '车型识别成功' : '未匹配到识别记录，可直接手动填写')
+      setSnapshot(next)
+      if (!isPublishableVehicle(next)) {
+        recognitionRef.current.vin = ''
+        notify('未获得完整可发布车型，请重新识别或联系平台')
+      }
     } catch (err) {
+      if (vinRef.current !== currentVin || recognitionRef.current.sequence !== sequence) return
+      recognitionRef.current.vin = ''
       setError(err)
+    } finally {
+      if (recognitionRef.current.sequence === sequence) setRecognizing(false)
     }
   }
 
-  const itemPayload = useCallback(
-    () =>
-      items
-        .filter((item) => item.name.trim())
-        .map((item) => ({
-          requestId: item.requestId,
-          name: item.name.trim(),
-          ...(item.oeCode ? { oeCode: item.oeCode.trim().toUpperCase() } : {}),
-          quantity: Number(item.quantity) || 1,
-          qualityCodes: item.qualityCodes.length ? item.qualityCodes : qualities[0] ? [qualities[0].code] : [],
-          resourceIds: [],
-          ...(item.remark ? { remark: item.remark.trim() } : {}),
-        })),
-    [items, qualities],
-  )
+  const changeVin = (value) => {
+    const next = value.trim().toUpperCase()
+    if (vinRef.current === next) return
+    vinRef.current = next
+    recognitionRef.current = { vin: '', sequence: recognitionRef.current.sequence + 1 }
+    setVin(next)
+    setRecognized(null)
+    setSnapshot(null)
+    setRecognizing(false)
+  }
+
+  const itemPayload = useCallback(() => toDraftItems(items), [items])
 
   /**
    * 落库（幂等友好）：首次创建草稿即带上配件，之后只在内容变化时 PATCH / PUT。
@@ -154,8 +135,6 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
         vin,
         plateNo: plateNo.trim(),
         claimNo: claimNo.trim(),
-        contactName: contact.name.trim(),
-        contactPhone: contact.phone.trim(),
         snapshot,
       })
       const itemsSig = JSON.stringify(payloadItems)
@@ -194,55 +173,30 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
       }
       return current
     },
-    [claimNo, contact.name, contact.phone, draft, itemPayload, plateNo, snapshot, vin, vinValid, notify],
+    [claimNo, draft, itemPayload, plateNo, snapshot, vin, vinValid, notify],
   )
 
-  const saveDraft = async () => {
-    if (busy) return
-    setBusy('draft')
-    setError(null)
-    try {
-      const saved = await persistDraft({ requireItems: true })
-      if (saved) notify('草稿已保存，中途换端可继续编辑')
-    } catch (err) {
-      setError(err)
-    } finally {
-      setBusy('')
-    }
-  }
-
   const publish = async () => {
-    if (busy) return
-    if (!contact.name.trim() || !/^1[3-9]\d{9}$/.test(contact.phone)) {
-      notify('请填写联系人和 11 位手机号')
-      return
-    }
-    setBusy('publish')
-    setError(null)
+    if (submitLock.current) return
     try {
+      if (!vinValid) throw new Error(VIN_ERROR)
+      if (recognizing || !isPublishableVehicle(snapshot)) throw new Error('请先完成当前 VIN 的车型识别')
+      if (addressError) throw new Error('收货地址加载失败，请刷新重试')
+      const address = addresses.list.find((row) => row.addressId === addresses.selected)
+      contactFromAddress(address)
+      itemPayload()
+      submitLock.current = true
+      setBusy('publish')
+      setError(null)
       const current = await persistDraft({ requireItems: true })
       if (!current) return
-      const result = await api.publishInquiry({
-        draftId: current.draftId,
-        version: current.version,
-        contact: { name: contact.name.trim(), phone: contact.phone.trim() },
-        // 收货地址只传 ID，地区码 / 经纬度由服务端按地址快照展开（契约：buyer-publish.html）
-        ...(addresses.selected ? { addressId: addresses.selected } : {}),
-        publishOptions: {
-          quotedType: 'SYSTEM',
-          // Q3 冻结：前端必传开票意图，服务端派生上游 openInvoiceType / requireItemInvoice
-          isOpenInvoice: options.isOpenInvoice,
-          isAnonymous: options.isAnonymous,
-          noReplacement: options.noReplacement,
-          // 平台推荐（SYSTEM）下店铺值会被上游忽略，按契约固定空数组
-          storeIds: [],
-        },
-      })
+      const result = await api.publishInquiry(toPublishInput(current, address, isOpenInvoice))
       notify(`询价已发布：${result.inquiryNo}`)
       onNavigate(`inquiries?highlight=${encodeURIComponent(result.inquiryId)}`)
     } catch (err) {
       setError(err)
     } finally {
+      submitLock.current = false
       setBusy('')
     }
   }
@@ -262,20 +216,11 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
 
   return (
     <>
-      <PageHead
-        eyebrow="首页 / 发布询价"
-        title="发布询价"
-        description="填写车辆、配件和品质要求，提交后平台将为您匹配供应商。"
-        action={
-          <div className="draft-state" data-testid="draft-state">
-            <span className="dot-live" />
-            {draft?.draftId ? `草稿 ${draft.draftId} · v${draft.version}` : '草稿未创建'}
-          </div>
-        }
-      />
+      <div className="page-head"><div className="eyebrow">首页 / 发布询价</div></div>
       <ErrorBox error={error} />
+      <ErrorBox error={addressError} />
       <Card className="form-card">
-        <div className="card-body">
+        <fieldset className="card-body publish-fields" disabled={Boolean(busy)}>
           <h3 className="section-title">车辆信息</h3>
           <div className="inquiry-vin">
             <label htmlFor="vinInput">VIN码</label>
@@ -284,16 +229,21 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
               data-testid="vin-input"
               value={vin}
               placeholder="请输入 17 位 VIN 码"
-              onChange={(event) => setVin(event.target.value.toUpperCase())}
+              onChange={(event) => changeVin(event.target.value)}
+              onBlur={recognize}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') { event.preventDefault(); recognize() }
+              }}
             />
-            <Button onClick={recognize} data-testid="recognize-vin">
-              识别车型
-            </Button>
+            {recognizing && <span role="status">正在识别车型…</span>}
+            {!recognizing && vinValid && !isPublishableVehicle(snapshot) && (
+              <Button onClick={recognize} data-testid="recognize-vin">重新识别</Button>
+            )}
             {recognized && (
               <span className="car-result" data-testid="vehicle-preview">
-                {recognized.vehicleModel?.model
-                  ? `${recognized.vehicleModel.carBrandName || ''} ${recognized.vehicleModel.model}`.trim()
-                  : '未识别到车型，可继续手动填写'}
+                {isPublishableVehicle(snapshot)
+                  ? `${snapshot.carBrandName} ${snapshot.model || snapshot.saleModelName}`.trim()
+                  : '未获得完整可发布车型，请重新识别'}
                 {recognized.vinMasked ? ` · ${recognized.vinMasked}` : ''}
               </span>
             )}
@@ -325,16 +275,20 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
           <div className="parts parts-wide">
             <div className="parts-head inquiry-parts-head">
               <span>序号</span>
-              <span>配件名称</span>
-              <span>数量</span>
+              <span><b className="required-mark">*</b> 配件信息</span>
+              <span><b className="required-mark">*</b> 数量</span>
               <span>备注</span>
               <span>配件实物图片</span>
               <span>原厂零件号</span>
               <span>标准名称</span>
-              <span>4S参考价(¥)</span>
+              <span>4S店参考价(¥)</span>
               <span>配件图</span>
               <span />
             </div>
+            <button type="button" className="parts-work-order" disabled title="工单上传和 OCR 尚未接入，15M 原型上限待确认">
+              <span className="work-order-plus">＋</span>
+              <span><b>拖拽工单图片到这里，或点击上传</b><small>工单上传 / OCR 待接入；当前资源接口上限 10MB，原型 15M 待确认</small></span>
+            </button>
             <div data-testid="publish-items">
               {items.map((item, index) => (
                 <div className="part-line inquiry-part-line" key={item.requestId} data-testid="publish-item-row">
@@ -361,10 +315,11 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
                     type="button"
                     className="upload-box"
                     data-testid={`item-photo-${index}`}
-                    onClick={() => notify('配件实物图片上传待接入草稿资源接口（本期未纳入）')}
+                    disabled
+                    title="配件实物图片上传待接入"
                   >
                     <b>＋</b>
-                    <small>拖拽工单图片到这里</small>
+                    <small>待接入</small>
                   </button>
                   <input
                     data-testid={`item-oe-${index}`}
@@ -372,7 +327,7 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
                     placeholder="原厂零件号"
                     onChange={(event) => patchItem(item.requestId, { oeCode: event.target.value })}
                   />
-                  <input value="" placeholder="标准名称" readOnly title="标准名称由平台配件库回填，本期接口未返回" />
+                  <input value="" placeholder="标准名称" readOnly title="配件标准化自动回填待接入" />
                   <span className="ref-price">-</span>
                   <span className="thumb">图</span>
                   <button
@@ -395,34 +350,12 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
             onClick={() =>
               setItems((rows) => [
                 ...rows,
-                { ...EMPTY_ITEM(), qualityCodes: qualities[0] ? [qualities[0].code] : [] },
+                { ...EMPTY_ITEM(), qualityCodes: [...batchQualities] },
               ])
             }
           >
             <Plus size={13} /> 添加配件
           </button>
-          <div className="parts-quality">
-            {items.map((item, index) => (
-              <label key={item.requestId} className="parts-quality-row">
-                <span>{index + 1}. {item.name || '未命名配件'}</span>
-                <select
-                  data-testid={`item-quality-${index}`}
-                  value={item.qualityCodes[0] || ''}
-                  onChange={(event) =>
-                    patchItem(item.requestId, { qualityCodes: event.target.value ? [event.target.value] : [] })
-                  }
-                >
-                  <option value="">选择品质</option>
-                  {qualities.map((quality) => (
-                    <option key={quality.code} value={quality.code}>
-                      {quality.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ))}
-          </div>
-
           <h3 className="section-title" style={{ marginTop: 26 }}>
             品质要求
           </h3>
@@ -443,7 +376,7 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
               </label>
             ))}
           </div>
-          <small className="field-hint">勾选后批量应用到所有配件行，行内选择框可再单独调整。</small>
+          <small className="field-hint">勾选后应用到所有配件；品质名称与编码以平台字典为准。</small>
 
           <h3 className="section-title" style={{ marginTop: 26 }}>
             其他要求
@@ -454,8 +387,8 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
                 type="radio"
                 name="invoice"
                 data-testid="option-invoice-none"
-                checked={!options.isOpenInvoice}
-                onChange={() => setOptions({ ...options, isOpenInvoice: false })}
+                checked={!isOpenInvoice}
+                onChange={() => setIsOpenInvoice(false)}
               />{' '}
               不需要发票
             </label>
@@ -464,8 +397,8 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
                 type="radio"
                 name="invoice"
                 data-testid="option-invoice-open"
-                checked={options.isOpenInvoice}
-                onChange={() => setOptions({ ...options, isOpenInvoice: true })}
+                checked={isOpenInvoice}
+                onChange={() => setIsOpenInvoice(true)}
               />{' '}
               需要发票
             </label>
@@ -481,24 +414,6 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
             联系方式
           </h3>
           <div className="form-grid">
-            <label>
-              联系人
-              <input
-                data-testid="publish-contact-name"
-                value={contact.name}
-                placeholder="请输入联系人姓名"
-                onChange={(event) => setContact({ ...contact, name: event.target.value })}
-              />
-            </label>
-            <label>
-              联系电话
-              <input
-                data-testid="publish-contact-phone"
-                value={contact.phone}
-                placeholder="11 位手机号"
-                onChange={(event) => setContact({ ...contact, phone: event.target.value })}
-              />
-            </label>
             <label className="wide">
               收货地址
               <select
@@ -513,68 +428,18 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
                   </option>
                 ))}
               </select>
-              <a className="manage-address" onClick={() => onNavigate('addresses')}>
+              <button type="button" className="manage-address" onClick={() => onNavigate('addresses')}>
                 管理收货地址
-              </a>
-            </label>
-          </div>
-
-          <div className="quality-box" data-testid="publish-summary">
-            <div>
-              <b>发布摘要</b>
-            </div>
-            <div className="confirm-line">
-              <span>VIN</span>
-              <small>{vin || '—'}</small>
-            </div>
-            <div className="confirm-line">
-              <span>车牌 / 报案号</span>
-              <small>{plateNo || '—'} / {claimNo || '—'}</small>
-            </div>
-            <div className="confirm-line">
-              <span>配件</span>
-              <small>
-                {filledItems.length
-                  ? filledItems
-                      .map((item) => `${item.name}×${item.quantity}（${qualityLabel(item.qualityCodes[0])}）`)
-                      .join('、')
-                  : '—'}
-              </small>
-            </div>
-            <label className="select-label">
-              <input
-                type="checkbox"
-                data-testid="option-anonymous"
-                checked={options.isAnonymous}
-                onChange={(event) => setOptions({ ...options, isAnonymous: event.target.checked })}
-              />{' '}
-              对商家匿名（买方信息不展示给供应商）
-            </label>
-            <label className="select-label">
-              <input
-                type="checkbox"
-                data-testid="option-no-replacement"
-                checked={options.noReplacement}
-                onChange={(event) => setOptions({ ...options, noReplacement: event.target.checked })}
-              />{' '}
-              不接受替代件
+              </button>
             </label>
           </div>
 
           <div className="form-actions inquiry-actions">
-            <Button
-              variant="outline"
-              onClick={saveDraft}
-              disabled={Boolean(busy)}
-              data-testid="step-next"
-            >
-              {busy === 'draft' ? '保存中…' : '保存草稿'}
-            </Button>
             <Button onClick={publish} disabled={Boolean(busy)} data-testid="step-publish">
               {busy === 'publish' ? '发布中…' : '发布询价'}
             </Button>
           </div>
-        </div>
+        </fieldset>
       </Card>
     </>
   )

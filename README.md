@@ -25,4 +25,16 @@ npm run dev
 VITE_API_BASE_URL=http://localhost:3000/api
 ```
 
-接口封装在 `src/api/client.js`，路径与 `hq_spc/docs/frontend-api-html/` 中的买家端接口文档保持一致。当前页面使用契约示例数据进行演示；后端可用时，报价选择会按接口契约发起请求，未启动后端时自动保持演示流程。
+接口封装在 `src/api/client.js`，路径与 `hq_spc/docs/frontend-api-html/` 中的买家端接口文档保持一致。发布页通过 API 封装请求数据；后端不可用时显示错误，不自动回落到示例数据。当前客户端仍使用非生产联调身份（mock-buyer），不代表真实公司或正式鉴权已接通。
+
+## 发布页隔离验收
+
+```bash
+npm run build
+npm run test:publish
+```
+
+- 以 `http://127.0.0.1:5184` 启动独立 Web；所有 `/api/` 请求由 Playwright 网络桩拦截，未知 API 立即失败。代理指向不可用端口，不会真实发布询价。
+- 验证四空行、VIN 识别及异步竞态、所选地址联系人、草稿/发布参数白名单、发票 true/false、输入校验、重复点击、失败保留输入，以及 1280/1440px 桌面宽表布局。截图/失败 trace 输出到系统临时目录 `hq-buyer-web-publish-results`。
+- 此测试是 UI 与请求契约测试，不证明 MongoDB 落库、正式身份、真实微服务受理或超时恢复。完整 `test:e2e` 中其它测试仍可能写真实后端，请只在已授权隔离环境执行。
+- 当前 PC 尚未接通：同 VIN 追加分流查询、工单 OCR/图片上传、标准化/4S价回填、跨端草稿恢复；真实配置缺口以设计仓库的联调记录为准。

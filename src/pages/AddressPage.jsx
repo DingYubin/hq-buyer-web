@@ -6,6 +6,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { MapPin, Plus, Store, TriangleAlert } from 'lucide-react'
 import { api } from '../api/client'
+import RegionPicker from '../components/RegionPicker'
 import { Button, Card, Empty, ErrorBox, Field, Modal, PageHead, Pager, Status, errorText, useToast } from '../components/ui'
 
 const PAGE_SIZE = 5
@@ -50,10 +51,10 @@ function validate(form) {
   if (!name) errors.name = '请填写收货人姓名'
   else if (name.length > 100) errors.name = '收货人姓名不超过 100 字'
   if (!PHONE_RE.test(phone)) errors.phone = '请输入 11 位手机号（1 开头，第二位 3–9）'
-  if (!codes.length) errors.regionCodes = '请填写地区编码，逗号分隔（1–4 个）'
+  if (!codes.length) errors.regionCodes = '请选择所在地区'
   else if (codes.length > 4) errors.regionCodes = '地区编码最多 4 级（省 / 市 / 区 / 街道）'
   else if (codes.some((code) => !CODE_RE.test(code))) errors.regionCodes = '地区编码需为 4–12 位数字'
-  if (!regionText) errors.regionText = '请填写地区名称（行政区划字典接口待补充，前端需手填）'
+  if (!regionText) errors.regionText = '请从地区字典选择所在地区'
   if (!detail) errors.detail = '请填写详细地址'
   else if (detail.length > 200) errors.detail = '详细地址不超过 200 字'
   const tel = (form.tel || '').trim()
@@ -77,6 +78,12 @@ export default function AddressPage({ onNavigate }) {
   const [form, setForm] = useState(EMPTY_FORM)
   const [formErrors, setFormErrors] = useState({})
   const [busy, setBusy] = useState(false)
+  const [regionReady, setRegionReady] = useState(false)
+
+  const changeRegions = useCallback((next) => {
+    setForm((previous) => ({ ...previous, ...next }))
+    setFormErrors((previous) => ({ ...previous, regionCodes: undefined, regionText: undefined }))
+  }, [])
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current
@@ -100,12 +107,14 @@ export default function AddressPage({ onNavigate }) {
   }, [load])
 
   const openCreate = () => {
+    setRegionReady(false)
     setForm(EMPTY_FORM)
     setFormErrors({})
     setEditing({ form: EMPTY_FORM })
   }
 
   const openEdit = (row) => {
+    setRegionReady(false)
     const next = {
       label: row.label || '',
       name: row.contact?.name || '',
@@ -127,6 +136,7 @@ export default function AddressPage({ onNavigate }) {
   }
 
   const save = async () => {
+    if (!regionReady || busy) return
     const { errors, payload } = validate(form)
     setFormErrors(errors)
     if (Object.keys(errors).length) return
@@ -325,7 +335,7 @@ export default function AddressPage({ onNavigate }) {
           </div>
           <b>地址信息不准可能影响报价</b>
           <p>地区与详细地址会用于发布询价和确认订单，请确认收货信息准确。</p>
-          <small>地区级联字典接口（geo_nodes）当前为空，地区名称需前端手填。</small>
+          <small>省、市、区、街道从地区字典选择；字典不可用时请重试或联系管理员，不手填编码。</small>
         </aside>
       </div>
 
@@ -333,14 +343,14 @@ export default function AddressPage({ onNavigate }) {
         <Modal
           testId="address-modal"
           title={editing.addressId ? '编辑收货地址' : '新增收货地址'}
-          description="保存后地址会立即生效，可用于发布询价和确认订单。"
+          description="请选择地区并填写收货信息；保存成功后可用于发布询价和确认订单。"
           onClose={closeModal}
           footer={
             <>
               <Button variant="ghost" onClick={closeModal} data-testid="address-cancel">
                 取消
               </Button>
-              <Button onClick={save} disabled={busy} data-testid="address-save">
+              <Button onClick={save} disabled={busy || !regionReady} data-testid="address-save">
                 {busy ? '保存中…' : '保存地址'}
               </Button>
             </>
@@ -379,22 +389,18 @@ export default function AddressPage({ onNavigate }) {
             />
             {formErrors.tel && <small className="field-error">{formErrors.tel}</small>}
           </Field>
-          <Field label="所在地区（名称）" required hint="行政区划字典接口待补充，暂时按「省 市 区 街道」手填">
-            <input
-              data-testid="address-region-text"
-              value={form.regionText}
-              placeholder="云南省 昆明市 官渡区 矣六街道"
-              onChange={change('regionText')}
-            />
+          <RegionPicker
+            value={form.regionCodes}
+            onChange={changeRegions}
+            onReadyChange={setRegionReady}
+            disabled={busy}
+          />
+          <Field label="已选地区（名称）" required hint="随上方地区选择自动生成">
+            <input data-testid="address-region-text" value={form.regionText} readOnly />
             {formErrors.regionText && <small className="field-error">{formErrors.regionText}</small>}
           </Field>
-          <Field label="地区编码" required hint="与上方名称同序，逗号分隔 1–4 级，例：530000,530100,530111,530111007">
-            <input
-              data-testid="address-region-codes"
-              value={form.regionCodes}
-              placeholder="530000,530100,530111,530111007"
-              onChange={change('regionCodes')}
-            />
+          <Field label="地区编码" required hint="与地区名称同序，提交时转换为字符串数组">
+            <input data-testid="address-region-codes" value={form.regionCodes} readOnly />
             {formErrors.regionCodes && <small className="field-error">{formErrors.regionCodes}</small>}
           </Field>
           <Field label="详细地址" required>

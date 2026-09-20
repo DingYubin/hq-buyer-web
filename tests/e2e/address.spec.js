@@ -61,8 +61,9 @@ test.describe('收货地址', () => {
     await page.getByTestId('address-label').fill(`${label}非法`)
     await page.getByTestId('address-contact-name').fill('端到端收货人')
     await page.getByTestId('address-contact-phone').fill('12345')
-    await page.getByTestId('address-region-text').fill('云南省 昆明市 官渡区 矣六街道')
-    await page.getByTestId('address-region-codes').fill('530000,530100,530111,53011110')
+    for (const [index, code] of ['530000', '530100', '530111', '53011110'].entries()) {
+      await page.getByTestId(`address-region-${index}`).selectOption(code)
+    }
     await page.getByTestId('address-detail').fill(detail)
     await page.getByTestId('address-save').click()
     await expect(page.getByTestId('address-modal')).toBeVisible()

@@ -509,3 +509,23 @@ input[type='radio'] {
 .user-menu button:hover:not(:disabled) { background: #f5f7fa; }
 .user-menu button:disabled { color: #aeb8c4; cursor: not-allowed; }
 .user-menu .logout { color: #c0392b; }
+
+/* 发布页新原型：草稿为内部步骤，表单发布期间整体只读。 */
+.publish-fields{border:0;margin:0;min-width:0}
+.publish-fields:disabled{opacity:.75}
+.publish-fields .parts-work-order{display:flex;align-items:center;gap:14px;width:100%;padding:16px;border-bottom:1px dashed var(--line);text-align:left;background:#fafbfd;color:var(--muted);cursor:not-allowed}
+.publish-fields .parts-work-order b,.publish-fields .parts-work-order small{display:block}
+.publish-fields .parts-work-order small{margin-top:5px;font-size:12px}
+.publish-fields .work-order-plus{font-size:28px}
+.publish-fields .required-mark{color:#d9363e}
+.publish-fields .upload-box:disabled{cursor:not-allowed;opacity:.65}
+
+/* 配件宽表必须显式启用 grid；列宽定义本身不会创建网格。 */
+.publish-fields .inquiry-parts-head,.publish-fields .inquiry-part-line{display:grid;align-items:center;gap:8px}
+.publish-fields .inquiry-parts-head{background:#fafbfd;color:var(--muted);font-size:12px}
+.publish-fields .parts-work-order{min-width:1050px}
+.publish-fields .inquiry-vin{display:flex;flex-wrap:wrap}
+.publish-fields .inquiry-vin input{flex:0 0 260px}
+.publish-fields .car-result{white-space:normal;max-width:100%}
+/* flex 主区允许收缩，宽表在自己的容器滚动而非撑宽整个页面。 */
+.main-content{min-width:0}
