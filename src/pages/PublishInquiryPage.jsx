@@ -1,10 +1,10 @@
 // 发布询价（buyer-publish.html）：原型是单页表单 ——
 // 车辆信息（VIN + 识别车型）→ 车牌号/报案号 → 录入配件信息（宽表格）→
 // 品质要求（按整单批量设品质）→ 其他要求（开票 / 平台推荐）→ 联系方式（收货地址）→ 发布询价。
-// 写入链路：POST /api/inquiry-drafts（含配件）→ PATCH 草稿 → PUT 草稿配件 → POST /api/inquiries
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+// 写入链路：POST /api/inquiries（publishMode=DIRECT），一次提交完整表单；PC 不创建草稿、不管理 version。
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
-import { contactFromAddress, isPublishableVehicle, toDraftItems, toPublishInput, toVehicleSnapshot } from './publishInquiryPayload'
+import { contactFromAddress, isPublishableVehicle, toDirectItems, toDirectPublishInput, toPictureRequirementsInput, toVehicleSnapshot } from './publishInquiryPayload'
 import { api, newIdempotencyKey } from '../api/client'
 import { Button, Card, ErrorBox, useToast } from '../components/ui'
 
@@ -19,10 +19,34 @@ const EMPTY_ITEM = () => ({
 
 const VIN_ERROR = 'VIN 需为 17 位大写字母数字，且不含 I/O/Q'
 
-export default function PublishInquiryPage({ onNavigate, draftId }) {
+const PICTURE_TYPE_LABELS = {
+  NAMEPLATE: '铭牌',
+  HEADSTOCK: '车头',
+  TAILSTOCK: '车尾',
+  PARTSLIST: '工单/配件清单',
+  NONE: '其他',
+  HEADSTOCK_TAILSTOCK: '车头/车尾',
+  HEADSTOCK_NAMEPLATE: '车头/铭牌',
+  TAILSTOCK_NAMEPLATE: '车尾/铭牌',
+  HEADSTOCK_TAILSTOCK_NAMEPLATE: '车头/车尾/铭牌',
+}
+
+/** 本单图片要求文案；图片上传入口未接通前如实说明，不伪造已上传。 */
+function pictureRequirementText(requirements) {
+  if (!requirements) return '车型识别后按接口返回本单需要的图片。'
+  const types = new Set([
+    ...(requirements.vehiclePictureTypeList || []),
+    ...(requirements.partPictureDemands || []).flatMap((row) => row.pictureTypeList || []),
+  ])
+  if (!types.size) return '本单无需上传图片。'
+  const labels = [...types].map((type) => PICTURE_TYPE_LABELS[type] || type)
+  return `本单需上传：${labels.join('、')}。图片上传入口待接入，接入后需先上传成功再传 URL。`
+}
+
+export default function PublishInquiryPage({ onNavigate }) {
   const notify = useToast()
   const [qualities, setQualities] = useState([])
-  const [draft, setDraft] = useState(draftId ? { draftId, version: null } : null)
+  const [pictureRequirements, setPictureRequirements] = useState(null)
   const [vin, setVin] = useState('')
   const [plateNo, setPlateNo] = useState('')
   const [claimNo, setClaimNo] = useState('')
@@ -38,8 +62,8 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
   const vinRef = useRef('')
   const recognitionRef = useRef({ vin: '', sequence: 0 })
   const submitLock = useRef(false)
-  /** 服务端最近一次落库的内容签名：内容未变时不重复写，避免空推 version。 */
-  const savedRef = useRef({ form: null, items: null })
+  /** 同一次提交（包体不变）复用同一个幂等键；包体变化视为新一次提交。 */
+  const submissionRef = useRef({ signature: null, key: null })
 
   useEffect(() => {
     api
@@ -114,67 +138,28 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
     setRecognizing(false)
   }
 
-  const itemPayload = useCallback(() => toDraftItems(items), [items])
-
-  /**
-   * 落库（幂等友好）：首次创建草稿即带上配件，之后只在内容变化时 PATCH / PUT。
-   * 返回最新 { draftId, version }，调用方不需要自己维护 version。
-   */
-  const persistDraft = useCallback(
-    async ({ requireItems = false } = {}) => {
-      if (!vinValid) {
-        notify(VIN_ERROR)
-        return null
-      }
-      const payloadItems = itemPayload()
-      if (requireItems && !payloadItems.length) {
-        notify('请至少填写一个配件')
-        return null
-      }
-      const formSig = JSON.stringify({
-        vin,
-        plateNo: plateNo.trim(),
-        claimNo: claimNo.trim(),
-        snapshot,
-      })
-      const itemsSig = JSON.stringify(payloadItems)
-      if (!draft?.draftId) {
-        const created = await api.createDraft({
-          source: 'PC',
-          vin,
-          ...(snapshot ? { vehicleSnapshot: snapshot } : {}),
-          ...(plateNo.trim() ? { plateNo: plateNo.trim() } : {}),
-          ...(claimNo.trim() ? { claimNo: claimNo.trim() } : {}),
-          items: payloadItems,
+  /** 图片要求：VIN 识别或配件变化后重查，提交时服务端会再复核一次（本版上传入口未接通）。 */
+  useEffect(() => {
+    if (!vinValid || !isPublishableVehicle(snapshot)) {
+      setPictureRequirements(null)
+      return undefined
+    }
+    let cancelled = false
+    const timer = setTimeout(() => {
+      api
+        .getPictureRequirements(toPictureRequirementsInput({ vin, snapshot, items }))
+        .then((data) => {
+          if (!cancelled) setPictureRequirements(data)
         })
-        const next = { draftId: created.draftId || created.inquiryId, version: created.version }
-        savedRef.current = { form: formSig, items: itemsSig }
-        setDraft(next)
-        return next
-      }
-      let current = { draftId: draft.draftId, version: draft.version }
-      if (savedRef.current.form !== formSig) {
-        const patched = await api.patchDraft(current.draftId, {
-          version: current.version,
-          vin,
-          ...(snapshot ? { vehicleSnapshot: snapshot } : {}),
-          plateNo: plateNo.trim() || null,
-          claimNo: claimNo.trim() || null,
+        .catch(() => {
+          if (!cancelled) setPictureRequirements(null)
         })
-        current = { draftId: current.draftId, version: patched.version ?? current.version }
-        savedRef.current.form = formSig
-        setDraft(current)
-      }
-      if (savedRef.current.items !== itemsSig) {
-        const saved = await api.saveDraftItems(current.draftId, { version: current.version, items: payloadItems })
-        current = { draftId: current.draftId, version: saved.version ?? current.version }
-        savedRef.current.items = itemsSig
-        setDraft(current)
-      }
-      return current
-    },
-    [claimNo, draft, itemPayload, plateNo, snapshot, vin, vinValid, notify],
-  )
+    }, 400)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [items, snapshot, vin, vinValid])
 
   const publish = async () => {
     if (submitLock.current) return
@@ -183,14 +168,23 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
       if (recognizing || !isPublishableVehicle(snapshot)) throw new Error('请先完成当前 VIN 的车型识别')
       if (addressError) throw new Error('收货地址加载失败，请刷新重试')
       const address = addresses.list.find((row) => row.addressId === addresses.selected)
-      contactFromAddress(address)
-      itemPayload()
+      const body = toDirectPublishInput({
+        vin,
+        plateNo: plateNo.trim(),
+        claimNo: claimNo.trim(),
+        snapshot,
+        items: toDirectItems(items),
+        address,
+        isOpenInvoice,
+      })
       submitLock.current = true
       setBusy('publish')
       setError(null)
-      const current = await persistDraft({ requireItems: true })
-      if (!current) return
-      const result = await api.publishInquiry(toPublishInput(current, address, isOpenInvoice))
+      const signature = JSON.stringify(body)
+      if (submissionRef.current.signature !== signature) {
+        submissionRef.current = { signature, key: newIdempotencyKey() }
+      }
+      const result = await api.publishInquiry(body, submissionRef.current.key)
       notify(`询价已发布：${result.inquiryNo}`)
       onNavigate(`inquiries?highlight=${encodeURIComponent(result.inquiryId)}`)
     } catch (err) {
@@ -377,6 +371,9 @@ export default function PublishInquiryPage({ onNavigate, draftId }) {
             ))}
           </div>
           <small className="field-hint">勾选后应用到所有配件；品质名称与编码以平台字典为准。</small>
+          <p className="field-hint" data-testid="picture-requirements">
+            {pictureRequirementText(pictureRequirements)}
+          </p>
 
           <h3 className="section-title" style={{ marginTop: 26 }}>
             其他要求

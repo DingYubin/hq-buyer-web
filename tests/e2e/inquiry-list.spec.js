@@ -23,7 +23,8 @@ const TAB_STATUS = {
   WITHDRAWN: ['WITHDRAWN', 'EXPIRED'],
 }
 
-const maskedVin = (vin) => `${vin.slice(0, 3)}${'*'.repeat(vin.length - 6)}${vin.slice(-3)}`
+// 掩码口径与后端 DirectInquiryService 落库时一致：前 3 + 10 个 * + 后 4
+const maskedVin = (vin) => `${vin.slice(0, 3)}${'*'.repeat(10)}${vin.slice(-4)}`
 
 test.describe('询价单列表', () => {
   test.beforeAll(async ({ request }) => {

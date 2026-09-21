@@ -1,13 +1,12 @@
-// 端到端测试公共工具：直连真实后端（/api 由 Vite 代理到 http://localhost:3002），不做任何 mock。
-// 身份：买家 Bearer mock-buyer；内部报价注入用 Bearer mock-hq（quotation:ingest 权限）。
+// 端到端测试公共工具：直连真实后端（/api 由 Vite 代理到联调栈 buyerUrl），不做任何 mock。
+// 身份：买家 Bearer mock-buyer（= 联调栈里的底层 userLoginId/companyId）。
 import { expect } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
 
 export const BUYER = { Authorization: 'Bearer mock-buyer' }
-export const HQ = { Authorization: 'Bearer mock-hq' }
 
-export const QUALITY_CODE = 'MOCK_ORIGINAL'
-export const CHANNEL_ORG_ID = 'mock-channel'
+/** 品质字典 code：design20 主数据只登记 ORIGINAL_BRAND（展示名「原厂」）。 */
+export const QUALITY_CODE = 'ORIGINAL_BRAND'
 export const CONTACT = { name: '况承泽', phone: '13058093388' }
 
 export const INQUIRY_STATUS_LABEL = {
@@ -28,51 +27,6 @@ export const SYNC_STATUS_LABEL = {
 }
 
 export const CART_ITEM_STATUS_LABEL = { NORMAL: '可结算', INVALID: '已失效', CONVERTED: '已转订单' }
-
-/** 造数用的车型快照：与后端 vehicleSnapshot 契约字段一致（发布门禁要求 carBrandId + carBrandName + model）。 */
-export const VEHICLE_MODEL = {
-  model: '530Li 领先型',
-  carBrandId: 'brand_bmw',
-  carBrandName: '宝马',
-  brandLogo: '',
-  saleModelCode: 'BMW530LI',
-  saleModelName: '530Li 领先型',
-  seriesId: 'series_bmw_5',
-  seriesZh: '宝马 5 系',
-  epcModelCode: 'EPC530LI',
-  energyType: '汽油',
-  carProduceYear: 2022,
-  locationId: 'loc_shenyang',
-  locationName: '华晨宝马',
-}
-
-/** 发布草稿需要的白名单快照（去掉只用于展示的 brandLogo / energyType / carProduceYear）。 */
-export const VEHICLE_SNAPSHOT = {
-  model: VEHICLE_MODEL.model,
-  carBrandId: VEHICLE_MODEL.carBrandId,
-  carBrandName: VEHICLE_MODEL.carBrandName,
-  saleModelCode: VEHICLE_MODEL.saleModelCode,
-  saleModelName: VEHICLE_MODEL.saleModelName,
-  seriesId: VEHICLE_MODEL.seriesId,
-  seriesZh: VEHICLE_MODEL.seriesZh,
-  epcModelCode: VEHICLE_MODEL.epcModelCode,
-  locationId: VEHICLE_MODEL.locationId,
-  locationName: VEHICLE_MODEL.locationName,
-}
-
-/**
- * 存一条 VIN 档案，使「识别车型」在本地稳定返回 RECOGNIZED。
- * 不依赖外部译码链路：GET /api/vehicles/vin/{vin} 先命中本组织 vin_records。
- */
-export async function seedVinRecord(request, vin = randomVin()) {
-  await apiOk(request, '/api/vehicles/vin-records', {
-    method: 'POST',
-    headers: BUYER,
-    idempotencyKey: newKey(),
-    data: { vin, source: 'PC', vehicleModel: VEHICLE_MODEL },
-  })
-  return vin
-}
 
 export const INQUIRY_COLUMNS = ['询价单号', '车辆信息 / VIN', '车牌号', '报案号', '配件信息', '发布时间', '状态', '操作']
 export const ADDRESS_COLUMNS = ['收货人', '所在地区', '详细地址', '手机号', '固定号码', '操作']
@@ -191,69 +145,75 @@ export async function waitToastGone(page) {
   await expect(page.getByTestId('toast')).toHaveCount(0)
 }
 
+/** 本地联调白名单内的图片 URL：DIRECT 发布要求带齐图片要求接口列出的车辆照片。 */
+export const DIRECT_VIN_PICTURE = 'https://mobile.example.com/vin/test/success/vin.jpg'
+export const DIRECT_NAMEPLATE_PICTURE = 'https://upload.example.com/test/agentBuy/nameplate.jpg'
+
+/** DIRECT 发布要求地址已绑定上游（syncState.externalBindingRef），这里取当前组织的默认地址。 */
+export async function defaultAddress(request) {
+  const data = await apiOk(request, '/api/addresses?pageNum=1&pageSize=100&status=ACTIVE')
+  const address = (data.list || []).find((row) => row.isDefault) || (data.list || [])[0]
+  if (!address) throw new Error('联调栈没有可用收货地址，无法发布 DIRECT 询价')
+  return address
+}
+
+/** 识别车型后只保留 DIRECT 快照白名单字段（brandLogo/energyType 等展示字段服务端不接受）。 */
+function toVehicleSnapshot(vehicleModel = {}) {
+  const keep = [
+    'model', 'carBrandId', 'carBrandName', 'saleModelCode', 'saleModelName',
+    'seriesId', 'seriesZh', 'seriesEn', 'epcModelCode', 'locationId', 'locationName',
+  ]
+  const snapshot = {}
+  for (const key of keep) {
+    if (typeof vehicleModel[key] === 'string' && vehicleModel[key].trim()) {
+      snapshot[key] = vehicleModel[key].trim()
+    }
+  }
+  return snapshot
+}
+
 /**
- * 造一条「已发布」询价单：建草稿 → 存配件 → 发布。返回后续链路需要的 id。
- * 全部走真实接口（POST /api/inquiry-drafts → PUT items → POST /api/inquiries）。
+ * 造一条「已发布」询价单：识别 VIN → 单次 POST /api/inquiries 直发（publishMode=DIRECT）。
+ * 与前端发布页共用同一条契约；旧草稿链（/api/inquiry-drafts）在 design20 已不开放。
  */
 export async function seedPublishedInquiry(request, overrides = {}) {
   const vin = overrides.vin || randomVin()
   const itemName = overrides.itemName || '前保险杠'
   const oeCode = overrides.oeCode || '51117379491'
   const quantity = overrides.quantity || 1
+  const requestId = `req_${compact().slice(0, 12)}`
 
-  const draft = await apiOk(request, '/api/inquiry-drafts', {
-    method: 'POST',
-    headers: BUYER,
-    idempotencyKey: newKey(),
-    data: { source: 'PC', vin, contact: CONTACT, items: [] },
-  })
-  const draftId = draft.inquiryId || draft.draftId
-
-  // 发布门禁（42248）要求草稿带完整车型快照，与页面「识别车型」写入的是同一份字段。
-  const patched = await apiOk(request, `/api/inquiry-drafts/${draftId}`, {
-    method: 'PATCH',
-    headers: BUYER,
-    idempotencyKey: newKey(),
-    data: { version: draft.version, vehicleSnapshot: VEHICLE_SNAPSHOT },
-  })
-
-  const saved = await apiOk(request, `/api/inquiry-drafts/${draftId}/items`, {
-    method: 'PUT',
-    headers: BUYER,
-    idempotencyKey: newKey(),
-    data: {
-      version: patched.version,
-      items: [
-        {
-          requestId: `req_${compact().slice(0, 12)}`,
-          name: itemName,
-          oeCode,
-          quantity,
-          qualityCodes: [QUALITY_CODE],
-          resourceIds: [],
-        },
-      ],
-    },
-  })
-  const inquiryItemId = saved.acceptedItems[0].inquiryItemId
+  const [recognition, address] = await Promise.all([
+    apiOk(request, `/api/vehicles/vin/${vin}`),
+    defaultAddress(request),
+  ])
+  expect(recognition.recognizeStatus, `VIN ${vin} 应能识别出车型`).toBe('RECOGNIZED')
+  const vehicleSnapshot = toVehicleSnapshot(recognition.vehicleModel)
 
   const published = await apiOk(request, '/api/inquiries', {
     method: 'POST',
     headers: BUYER,
     idempotencyKey: newKey(),
     data: {
-      draftId,
-      version: saved.version,
+      publishMode: 'DIRECT',
+      source: 'PC',
+      vin,
+      vehicleSnapshot,
+      vinPicture: DIRECT_VIN_PICTURE,
+      inquiryAdditionalImages: [
+        { mediaType: 'PICTURE', typeId: 'NAMEPLATE', url: DIRECT_NAMEPLATE_PICTURE },
+      ],
+      items: [{ requestId, name: itemName, oeCode, quantity, qualityCodes: [QUALITY_CODE] }],
       contact: CONTACT,
-      publishOptions: {
-        quotedType: 'SYSTEM',
-        isOpenInvoice: true,
-        isAnonymous: true,
-        noReplacement: false,
-        storeIds: [],
-      },
+      addressId: address.addressId,
+      publishOptions: { quotedType: 'SYSTEM', isOpenInvoice: true },
     },
   })
+
+  // 发布响应只有单号与版本；配件 ID（报价选择 / 购物车按它对齐）在详情接口里。
+  const detail = await apiOk(request, `/api/inquiries/${published.inquiryId}`)
+  const inquiryItemId = detail.items?.[0]?.inquiryItemId
+  expect(inquiryItemId, '发布后的询价详情应返回配件行').toBeTruthy()
 
   return {
     vin,
@@ -261,68 +221,53 @@ export async function seedPublishedInquiry(request, overrides = {}) {
     oeCode,
     quantity,
     itemCount: 1, // seedPublishedInquiry 固定写入 1 行配件
-    draftId,
+    vehicleSnapshot,
     inquiryId: published.inquiryId,
     inquiryNo: published.inquiryNo,
     inquiryItemId,
-    inquiryVersion: published.version,
+    inquiryVersion: detail.version,
   }
 }
 
 /**
- * 造一条「已报价」询价单：发布后由 mock-hq 通过内部接口注入报价。
- * 返回报价结果 / 购物车 / 订单链路需要的全部 id。
+ * 造一条「已报价」询价单：发布后由卖家服务定时拉取外部报价源聚合进报价投影，
+ * 买方只读 GET /api/inquiries/{id}/quotations（不调用内部注入接口，也不自造报价）。
  */
 export async function seedQuotedInquiry(request, overrides = {}) {
   const base = await seedPublishedInquiry(request, overrides)
-  const sellAmount = overrides.sellAmount || '1200.00'
-  const availableQuantity = overrides.availableQuantity || 5
-
-  const quotationId = `qt_${compact().slice(0, 16)}`
-  const quotationItemId = `qi_${compact().slice(0, 16)}`
-  const ingested = await apiOk(request, '/api/internal/inquiry-quotation-results', {
-    method: 'POST',
-    headers: HQ, // 内部接口：必须 mock-hq，channelOrgId 必须是绑定关系里的渠道组织
-    data: {
-      eventId: `evt_${compact().slice(0, 16)}`,
-      inquiryId: base.inquiryId,
-      channelOrgId: CHANNEL_ORG_ID,
-      quotationId,
-      revision: 1,
-      supplierRef: 'sup_1',
-      status: 'VALID',
-      validUntil: '2026-12-31T00:00:00Z',
-      items: [
-        {
-          quotationItemId,
-          inquiryItemId: base.inquiryItemId,
-          qualityCode: QUALITY_CODE,
-          sellAmount,
-          currency: 'CNY',
-          availableQuantity,
-          stockStatus: 'AVAILABLE',
-          leadTimeDays: 2,
-        },
-      ],
-    },
-  })
+  const timeoutAt = Date.now() + 20_000
+  let line = null
+  let version = base.inquiryVersion
+  while (!line && Date.now() < timeoutAt) {
+    const data = await apiOk(
+      request,
+      `/api/inquiries/${base.inquiryId}/quotations?pageNum=1&pageSize=100&groupBy=PART&sort=MATCH`,
+    )
+    line = (data.list || [])[0] || null
+    version = data.version ?? version
+    if (!line) await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  expect(line, `询价 ${base.inquiryNo} 在 20s 内没有被同步出报价（卖家拉取链路）`).toBeTruthy()
 
   return {
     ...base,
-    sellAmount,
-    availableQuantity,
-    quotationId,
-    quotationItemId,
-    inquiryVersion: ingested.version,
+    sellAmount: line.sellAmount,
+    availableQuantity: line.availableQuantity,
+    quotationId: line.quotationId,
+    quotationItemId: line.quotationItemId,
+    inquiryItemId: line.inquiryItemId ?? base.inquiryItemId,
+    inquiryVersion: version,
   }
 }
 
 /**
- * 造一个「恰好 1 行」的 ACTIVE 购物车（基于新造的已报价询价单）。
+ * 造一个「恰好 1 行可结算（NORMAL）」的 ACTIVE 购物车（基于新造的已报价询价单）。
  *
  * 买方组织在同一时刻只有一张 ACTIVE 车（uq_carts_buyer_owner_active），
- * 重复 `POST /api/carts` 会复用同一张车，因此这里先按 version 清空，
- * 保证用例断言行数时不受历史遗留行影响。
+ * 重复 `POST /api/carts` 会复用同一张车；而已经生成订单的行（itemStatus=CONVERTED）
+ * 按契约不可删除，会长期留在车里（历史用例下单后的正常结果）。
+ * 因此这里先清掉历史 NORMAL 行，再断言时只看 NORMAL 行：
+ * 返回的 normalRows/line 就是本次用例可操作的唯一一行。
  */
 export async function seedCart(request, overrides = {}) {
   const quote = await seedQuotedInquiry(request, overrides)
@@ -333,7 +278,7 @@ export async function seedCart(request, overrides = {}) {
     data: { source: 'QUOTATION', inquiryIds: [quote.inquiryId] },
   })
   const beforeClear = await apiOk(request, `/api/carts/${created.cartId}?pageNum=1&pageSize=100`)
-  if ((beforeClear.list || []).length > 0) {
+  if ((beforeClear.list || []).some((row) => row.itemStatus === 'NORMAL')) {
     await apiOk(request, `/api/carts/${created.cartId}/clear`, {
       method: 'POST',
       headers: BUYER,
@@ -350,5 +295,23 @@ export async function seedCart(request, overrides = {}) {
     },
   })
   const detail = await apiOk(request, `/api/carts/${created.cartId}?pageNum=1&pageSize=100`)
-  return { ...quote, cartId: created.cartId, cartVersion: detail.version, addedCount: added.addedCount, detail }
+  const normalRows = detail.list.filter((row) => row.itemStatus === 'NORMAL')
+  const lockedRows = detail.list.filter((row) => row.itemStatus !== 'NORMAL')
+  expect(normalRows.length, `加购后应有且仅有 1 行 NORMAL，实际 ${detail.list.map((row) => row.itemStatus).join('/')}`).toBe(1)
+  return {
+    ...quote,
+    cartId: created.cartId,
+    cartVersion: detail.version,
+    addedCount: added.addedCount,
+    detail,
+    normalRows,
+    lockedRows,
+    line: normalRows[0],
+  }
+}
+
+/** 行金额合计（服务端口径：排除 INVALID 行，CONVERTED 行仍计入全量合计）。 */
+export function remainingItemsAmount(rows) {
+  const total = rows.filter((row) => !row.invalidReason).reduce((sum, row) => sum + Number(row.unitPrice) * row.quantity, 0)
+  return total.toFixed(2)
 }

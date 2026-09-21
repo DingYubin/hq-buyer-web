@@ -1,9 +1,12 @@
-// 发布页字段白名单。草稿表单与 POST /api/inquiries 是两个契约，不透传上游 DTO。
+// 发布页字段白名单。PC 直发（DIRECT）一次提交完整表单：
+// 不创建草稿、不传 draftId/version、不传 items[].resourceIds，图片只传已上传的持久 HTTPS URL。
 const VEHICLE_KEYS = [
   'model', 'carBrandId', 'carBrandName', 'saleModelCode', 'saleModelName',
   'seriesId', 'seriesZh', 'seriesEn', 'epcModelCode', 'locationId', 'locationName',
   'vehicleType', 'engineType',
 ]
+// POST /api/inquiries/picture-requirements 只接受这 6 个快照键，且 unknown(false)，不能整份透传。
+const PICTURE_SNAPSHOT_KEYS = ['carBrandId', 'locationId', 'locationName', 'seriesId', 'seriesZh', 'seriesEn']
 
 export function toVehicleSnapshot(model) {
   if (!model) return null
@@ -18,7 +21,7 @@ export function isPublishableVehicle(snapshot) {
   return Boolean(snapshot?.carBrandId && snapshot?.carBrandName && (snapshot?.model || snapshot?.saleModelName))
 }
 
-export function toDraftItems(rows) {
+export function toDirectItems(rows) {
   // 只有完全空白的占位行可忽略；有备注/OE却缺少配件名称时不能静默丢失。
   const filled = rows.filter((row) => row.name.trim() || row.oeCode.trim() || row.remark.trim())
   if (!filled.length) throw new Error('请至少填写一个配件')
@@ -38,7 +41,6 @@ export function toDraftItems(rows) {
       ...(row.oeCode.trim() ? { oeCode: row.oeCode.trim().toUpperCase() } : {}),
       qualityCodes: [...row.qualityCodes],
       ...(row.remark.trim() ? { remark: row.remark.trim() } : {}),
-      resourceIds: [],
     }
   })
 }
@@ -54,15 +56,37 @@ export function contactFromAddress(address) {
   return { name, phone }
 }
 
-export function toPublishInput(draft, address, isOpenInvoice) {
-  if (!draft?.draftId || !Number.isSafeInteger(draft.version) || draft.version < 1) {
-    throw new Error('草稿版本无效，请重新加载后再发布')
+/** 图片要求查询：车辆/配件变化后重查，服务端在提交时会再复核一次。 */
+export function toPictureRequirementsInput({ vin, snapshot, items }) {
+  if (!snapshot?.carBrandId) throw new Error('请先完成当前 VIN 的车型识别')
+  const vehicleSnapshot = {}
+  for (const key of PICTURE_SNAPSHOT_KEYS) {
+    if (typeof snapshot[key] === 'string' && snapshot[key].trim()) vehicleSnapshot[key] = snapshot[key].trim()
   }
-  if (typeof isOpenInvoice !== 'boolean') throw new Error('请选择是否需要发票')
   return {
-    draftId: draft.draftId,
-    version: draft.version,
-    contact: contactFromAddress(address),
+    vin,
+    vehicleSnapshot,
+    items: items.map((row) => ({ requestId: row.requestId, ...(row.name.trim() ? { name: row.name.trim() } : {}) })),
+  }
+}
+
+/**
+ * PC DIRECT 完整发布体：服务端内部创建记录并直连 saveInquiry。
+ * 不传 draftId/version/inquiryId/resourceIds，也不传裸上游字段。
+ */
+export function toDirectPublishInput({ vin, plateNo, claimNo, snapshot, items, address, isOpenInvoice, images = [] }) {
+  if (typeof isOpenInvoice !== 'boolean') throw new Error('请选择是否需要发票')
+  const contact = contactFromAddress(address)
+  return {
+    publishMode: 'DIRECT',
+    source: 'PC',
+    vin,
+    vehicleSnapshot: snapshot,
+    ...(plateNo ? { plateNo } : {}),
+    ...(claimNo ? { claimNo } : {}),
+    ...(images.length ? { inquiryAdditionalImages: images } : {}),
+    items,
+    contact,
     addressId: address.addressId,
     publishOptions: {
       quotedType: 'SYSTEM',

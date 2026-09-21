@@ -171,7 +171,13 @@ export default function CartPage({ cartId, onNavigate, onCartChange }) {
                     const issue = invalidMap.get(row.cartItemId)
                     const disabled = row.itemStatus !== 'NORMAL'
                     return (
-                      <div className="cart-row" key={row.cartItemId} data-testid="cart-row" data-cart-item-id={row.cartItemId}>
+                      <div
+                          className="cart-row"
+                          key={row.cartItemId}
+                          data-testid="cart-row"
+                          data-cart-item-id={row.cartItemId}
+                          data-item-status={row.itemStatus}
+                        >
                         <input
                           type="checkbox"
                           data-testid="cart-row-check"

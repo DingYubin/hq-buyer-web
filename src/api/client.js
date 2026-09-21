@@ -102,28 +102,11 @@ async function request(path, { method = 'GET', body, params, idempotencyKey, hea
 
 export const api = {
   // ---------- 发布询价（buyer-publish.html） ----------
+  // PC 走 DIRECT：VIN 识别 → 图片要求 → 一次 POST /inquiries 提交完整表单。
+  // 不接入草稿链（/inquiry-drafts、draft resources），App 端的草稿协议不在本端使用。
   recognizeVin: (vin) => request(`/vehicles/vin/${encodeURIComponent(vin)}`),
   listQualities: () => request('/master-data/qualities'),
-  createDraft: (body, key = newIdempotencyKey()) =>
-    request('/inquiry-drafts', { method: 'POST', body, idempotencyKey: key }),
-  getDraft: (draftId) => request(`/inquiry-drafts/${draftId}`),
-  patchDraft: (draftId, body, key = newIdempotencyKey()) =>
-    request(`/inquiry-drafts/${draftId}`, { method: 'PATCH', body, idempotencyKey: key }),
-  saveDraftItems: (draftId, body, key = newIdempotencyKey()) =>
-    request(`/inquiry-drafts/${draftId}/items`, { method: 'PUT', body, idempotencyKey: key }),
-  addDraftItems: (draftId, body, key = newIdempotencyKey()) =>
-    request(`/inquiry-drafts/${draftId}/items`, { method: 'POST', body, idempotencyKey: key }),
-  mergePreview: (draftId, body, key = newIdempotencyKey()) =>
-    request(`/inquiry-drafts/${draftId}/merge-preview`, { method: 'POST', body, idempotencyKey: key }),
-  getDraftAppendOptions: (draftId) => request(`/inquiry-drafts/${draftId}/append-options`),
-  appendDraftResources: (draftId, body, key = newIdempotencyKey()) =>
-    request(`/inquiry-drafts/${draftId}/resources`, { method: 'POST', body, idempotencyKey: key }),
-  replaceDraftResources: (draftId, body, key = newIdempotencyKey()) =>
-    request(`/inquiry-drafts/${draftId}/resources`, { method: 'PUT', body, idempotencyKey: key }),
-  createUploadIntent: (body, key = newIdempotencyKey()) =>
-    request('/resources/upload-intents', { method: 'POST', body, idempotencyKey: key }),
-  completeUpload: (uploadId, body, key = newIdempotencyKey()) =>
-    request(`/resources/${uploadId}/complete`, { method: 'POST', body, idempotencyKey: key }),
+  getPictureRequirements: (body) => request('/inquiries/picture-requirements', { method: 'POST', body }),
   publishInquiry: (body, key = newIdempotencyKey()) =>
     request('/inquiries', { method: 'POST', body, idempotencyKey: key }),
 

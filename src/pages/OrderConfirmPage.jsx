@@ -4,11 +4,20 @@
 // 前端不下单金额：页面所有金额都展示预览接口返回值。
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircle2, ChevronRight, FileText, MapPin, Truck } from 'lucide-react'
-import { api } from '../api/client'
+import { api, newIdempotencyKey } from '../api/client'
 import { amount, formatDateTime } from '../lib/format'
 import { Button, Card, Empty, ErrorBox, Field, PageHead, Status, errorText, useToast } from '../components/ui'
 
 const money = (value) => (value === null || value === undefined ? '—' : `¥${amount(value)}`)
+
+// 提交成功后的中文状态文案；未知状态原样展示，不编造流程。
+const ORDER_STATUS_LABEL = {
+  PENDING_APPROVAL: '待审批',
+  APPROVED: '已通过',
+  PENDING_SHIPMENT: '待发货',
+  SHIPPED: '已发货',
+  CLOSED: '已结案',
+}
 
 const INVOICE_OPTIONS = [
   { value: 'NORMAL', label: '增值税普通发票' },
@@ -45,7 +54,13 @@ export default function OrderConfirmPage({ cartId, cartItemIds = [], onNavigate 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
   const [order, setOrder] = useState(null)
+  const [previewedBody, setPreviewedBody] = useState('')
+  // 购物车被其他端 / 其他 Tab 改动（40911）后勾选行已消失：停止预览并引导用户回购物车。
+  const [cartChanged, setCartChanged] = useState(false)
   const requestId = useRef(0)
+  // 同一份提交包体（含 previewToken）复用同一个幂等键：网络重试不会重复下单；
+  // 包体变化必须换新键，否则服务端会按 40910 拒绝。
+  const submitKey = useRef({ signature: '', key: '' })
 
   const load = useCallback(async () => {
     if (!cartId || !cartItemIds.length) {
@@ -134,14 +149,19 @@ export default function OrderConfirmPage({ cartId, cartItemIds = [], onNavigate 
     [addressId, cart, cartId, cartItemIds, contact, deliveryMode, deliveryTime, invoice, remark, serviceFee],
   )
 
+  // 预览的事实源是「服务端对这份包体的计算结果」；包体指纹保留下来判定预览是否已过期。
+  const bodyJson = useMemo(() => (cart ? JSON.stringify(body()) : ''), [body, cart])
+
   const previewNow = useCallback(async () => {
-    if (!cart || !addressId || !invoiceValid || !contactValid) return
+    if (!cart || !addressId || !invoiceValid || !contactValid || cartChanged) return
     const id = ++requestId.current
+    const requestBody = bodyJson
     setPreviewing(true)
     try {
-      const data = await api.previewOrder(body())
+      const data = await api.previewOrder(JSON.parse(requestBody))
       if (id === requestId.current) {
         setPreview(data)
+        setPreviewedBody(requestBody)
         setError(null)
       }
     } catch (err) {
@@ -149,7 +169,7 @@ export default function OrderConfirmPage({ cartId, cartItemIds = [], onNavigate 
     } finally {
       if (id === requestId.current) setPreviewing(false)
     }
-  }, [addressId, body, cart, contactValid, invoiceValid])
+  }, [addressId, bodyJson, cart, cartChanged, contactValid, invoiceValid])
 
   // 地址 / 发票 / 配送 / 管理费变化 → 重新预览（服务端才是金额事实源）。
   useEffect(() => {
@@ -157,20 +177,48 @@ export default function OrderConfirmPage({ cartId, cartItemIds = [], onNavigate 
     return () => window.clearTimeout(timer)
   }, [previewNow])
 
+  // 预览落后于当前包体（正在重算或还没算完）时禁止提交，避免拿旧 previewToken 赌服务端 41001。
+  const previewStale = Boolean(preview) && previewedBody !== bodyJson
+
   const submit = async () => {
-    if (!preview?.previewToken) {
+    if (!preview?.previewToken || previewStale) {
       notify('请先完成订单预览')
       return
     }
+    const payload = { ...body(), previewToken: preview.previewToken }
+    const signature = JSON.stringify(payload)
+    if (submitKey.current.signature !== signature)
+      submitKey.current = { signature, key: newIdempotencyKey() }
     setSubmitting(true)
     try {
-      const result = await api.submitOrder({ ...body(), previewToken: preview.previewToken })
+      const result = await api.submitOrder(payload, submitKey.current.key)
       setOrder(result)
       notify(`订单已提交：${result.orderNo}`)
     } catch (err) {
       if (err?.code === 41001) {
+        // 服务端判定绑定信息已变化：凭据作废，立刻重算并让用户再确认一次。
+        setPreview(null)
+        setPreviewedBody('')
         notify('预览已过期，正在重新计算金额')
         await previewNow()
+      } else if (err?.code === 40911) {
+        // 购物车被其他端 / 其他 Tab 改动：保留已填信息 → 回读购物车 → 按最新数据重算金额。
+        setPreview(null)
+        setPreviewedBody('')
+        try {
+          const fresh = await api.getCart(cartId, { pageNum: 1, pageSize: 100 })
+          const alive = new Set((fresh.list || []).map((row) => row.cartItemId))
+          setCart(fresh)
+          if (cartItemIds.some((id) => !alive.has(id))) {
+            // 勾选行已不在购物车：不再按旧勾选预览，交给用户重新确认。
+            setCartChanged(true)
+            notify('购物车已被其他端修改，请返回购物车重新确认')
+          } else {
+            notify('购物车已更新，金额已按最新数据重新计算，请确认后再次提交')
+          }
+        } catch (refreshError) {
+          setError(refreshError)
+        }
       } else {
         setError(err)
       }
@@ -187,7 +235,9 @@ export default function OrderConfirmPage({ cartId, cartItemIds = [], onNavigate 
           <div className="confirm-block">
             <span>订单号</span>
             <b data-testid="order-success-no">{order.orderNo}</b>
-            <small>订单状态 {order.status} · 审批任务 {order.approvalTaskCount} 个</small>
+            <small data-testid="order-success-status">
+              订单状态 {ORDER_STATUS_LABEL[order.status] || order.status} · 审批任务 {order.approvalTaskCount} 个
+            </small>
           </div>
           <div className="confirm-block">
             <span>供应商</span>
@@ -245,6 +295,15 @@ export default function OrderConfirmPage({ cartId, cartItemIds = [], onNavigate 
         }
       />
       <ErrorBox error={error} onRetry={previewNow} />
+      {cartChanged && (
+        <Card className="confirm-card" data-testid="order-cart-changed">
+          <span>购物车已被其他端修改</span>
+          <small>勾选的配件已不在购物车，请返回购物车重新勾选后再结算（已填写的地址、发票、备注不会被清空）。</small>
+          <Button onClick={() => onNavigate(`cart?cartId=${cartId}`)} data-testid="order-cart-changed-back">
+            返回购物车
+          </Button>
+        </Card>
+      )}
       <Card className="confirm-card">
         <div className="confirm-block" data-testid="order-address-block">
           <span>收货地址</span>
@@ -464,7 +523,9 @@ export default function OrderConfirmPage({ cartId, cartItemIds = [], onNavigate 
           </Button>
           <Button
             onClick={submit}
-            disabled={!preview || submitting || previewing || !invoiceValid || !contactValid}
+            disabled={
+              !preview || previewStale || submitting || previewing || cartChanged || !invoiceValid || !contactValid
+            }
             data-testid="order-submit"
           >
             {submitting ? '提交中…' : '提交订单'}

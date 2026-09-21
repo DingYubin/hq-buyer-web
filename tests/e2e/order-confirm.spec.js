@@ -18,7 +18,9 @@ test.describe('确认订单', () => {
   test('预览金额取自服务端，管理费只提报不计入合计，提交后落单', async ({ page, request }) => {
     const seeded = await seedCart(request)
     const cart = await detailOf(request, seeded.cartId)
-    const line = cart.list[0]
+    // 同一组织的 ACTIVE 车是共享的：历史用例下单留下的 CONVERTED 行不可删除，只有 NORMAL 行可结算。
+    const line = seeded.line
+    expect(line.itemStatus).toBe('NORMAL')
     const addresses = await activeAddresses(request)
     const address = addresses.list.find((row) => row.isDefault) || addresses.list[0]
     expect(address, '提交订单前需要存在 ACTIVE 收货地址').toBeTruthy()
@@ -61,7 +63,8 @@ test.describe('确认订单', () => {
     await expect(page.getByTestId('order-item-group')).toHaveCount(1)
     await expect(page.getByTestId('order-item-row')).toHaveCount(1)
     await expect(page.getByTestId('order-item-row').first()).toContainText(line.partName)
-    await expect(page.getByTestId('order-vehicle-vin')).toHaveText(preview.vehicle.vin)
+    // DIRECT 链路卖家侧只落 VIN 掩码（vinMasked），预览契约允许 vehicle.vin 为 null，页面回退「—」。
+    await expect(page.getByTestId('order-vehicle-vin')).toHaveText(preview.vehicle.vin ?? '—')
 
     // 管理费：金额由服务端按费率算，且不计入应付总额。
     // 页面输入 "12.5"，提交前按契约补零为 "12.50"（费率同为两位小数字符串）。
@@ -78,7 +81,7 @@ test.describe('确认订单', () => {
     // 提交订单：body 与预览一致 + previewToken
     await page.getByTestId('order-submit').click()
     await expect(page.getByTestId('order-success')).toBeVisible({ timeout: 30_000 })
-    await expect(page.getByTestId('order-success-no')).toHaveText(/^HQO\d{12}$/)
+    await expect(page.getByTestId('order-success-no')).toHaveText(/^HQO\d{8}[0-9A-F]{16}$/)
     await expect(page.getByTestId('order-success-total')).toHaveText(money(feePreview.totals.grandTotal))
 
     // 下单后购物车行转为已转订单（不可再结算）
@@ -89,7 +92,8 @@ test.describe('确认订单', () => {
   test('发票类型切换：NONE 隐藏抬头，VAT_SPECIAL 需要税号，必填未填时禁止提交', async ({ page, request }) => {
     const seeded = await seedCart(request)
     const cart = await detailOf(request, seeded.cartId)
-    const line = cart.list[0]
+    const line = seeded.line
+    expect(line.itemStatus).toBe('NORMAL')
 
     await openPage(page, `order-confirm?cartId=${seeded.cartId}&cartItemIds=${line.cartItemId}`)
     await expect(page.getByTestId('invoice-title')).toBeVisible()

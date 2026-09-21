@@ -32,9 +32,10 @@ async function mockApi(page, options = {}) {
       if (options.recognize) return options.recognize(route, path.split('/').at(-1))
       return ok(route, { recognizeStatus: 'RECOGNIZED', vehicleModel: MODEL })
     }
-    if (path === '/api/inquiry-drafts' && method === 'POST') return ok(route, { draftId: 'draft_test', version: 1 })
-    if (path === '/api/inquiry-drafts/draft_test' && method === 'PATCH') return ok(route, { draftId: 'draft_test', version: body.version + 1 })
-    if (path === '/api/inquiry-drafts/draft_test/items' && method === 'PUT') return ok(route, { version: body.version + 1 })
+    if (path === '/api/inquiries/picture-requirements' && method === 'POST') {
+      if (options.pictureRequirements) return options.pictureRequirements(route, body)
+      return ok(route, { vehiclePictureTypeList: ['NAMEPLATE'], partPictureDemands: [], isOcrPilot: false })
+    }
     if (path === '/api/inquiries' && method === 'POST') {
       if (options.publish) return options.publish(route)
       return ok(route, { inquiryId: 'inq_test', inquiryNo: 'TEST_ONLY', status: 'PUBLISHED' })
@@ -46,7 +47,9 @@ async function mockApi(page, options = {}) {
   await expect(page.getByTestId('batch-quality').getByText('原厂', { exact: true })).toBeVisible()
   return {
     requests,
-    writes: () => requests.filter((r) => r.method !== 'GET'),
+    // 图片要求是只读查询（POST 语义），不计入写请求；真正写入只应有一次 POST /api/inquiries。
+    writes: () => requests.filter((r) => r.method !== 'GET' && r.path !== '/api/inquiries/picture-requirements'),
+    pictureRequirements: () => requests.filter((r) => r.path === '/api/inquiries/picture-requirements'),
     assertHealthy: async () => {
       expect(unexpected).toEqual([])
       expect(pageErrors).toEqual([])
@@ -86,7 +89,7 @@ test.describe('发布询价 · 隔离 UI/请求契约', () => {
     await state.assertHealthy()
   })
 
-  for (const invoice of [true, false]) test(`隐式草稿→发布：选中地址带 contact；isOpenInvoice=${invoice}`, async ({ page }, info) => {
+  for (const invoice of [true, false]) test(`DIRECT 一次提交：选中地址带 contact；isOpenInvoice=${invoice}`, async ({ page }, info) => {
     const state = await mockApi(page)
     await fillForm(page)
     await page.getByTestId('publish-plate-no').fill('云A12345')
@@ -100,21 +103,41 @@ test.describe('发布询价 · 隔离 UI/请求契约', () => {
     await page.getByTestId('add-item').click()
     await expect(page.getByTestId('publish-item-row')).toHaveCount(5)
     await page.evaluate(() => window.scrollTo(0, 0))
+    // 图片要求在提交前即自动查询并展示（防抖 400ms），服务端提交时会再复核一次。
+    await expect(page.getByTestId('picture-requirements')).toContainText('本单需上传：铭牌')
+    const [requirements] = state.pictureRequirements()
+    // 只提交 pictureInputSchema 允许的 6 个快照键，且不含草稿链路字段。
+    // 契约：只允许 carBrandId/locationId/locationName/seriesId/seriesZh/seriesEn 六个键（unknown(false)），saleModelCode 会被拒。
+    expect(requirements.body.vehicleSnapshot).toEqual({ carBrandId: 'TEST_BRAND', seriesId: 'SERIES_1' })
+    expect(Object.keys(requirements.body)).toEqual(['vin', 'vehicleSnapshot', 'items'])
     await page.screenshot({ path: info.outputPath('publish-filled.png'), fullPage: true })
     await page.getByTestId('step-publish').click()
     await expect(page).toHaveURL(/#\/inquiries\?highlight=inq_test$/)
-    const [draft, publish] = state.writes()
-    expect(state.writes()).toHaveLength(2)
-    expect(draft.path).toBe('/api/inquiry-drafts')
-    const { brandLogo, energyType, ...snapshot } = MODEL
-    expect(draft.body).toEqual({ source: 'PC', vin: VIN, vehicleSnapshot: snapshot, plateNo: '云A12345', claimNo: 'TEST_CLAIM', items: [
-      { requestId: expect.any(String), name: '前刹车片', quantity: 1, oeCode: 'A0004202404', qualityCodes: ['ORIGINAL_BRAND', 'OTHER_BRAND'], resourceIds: [] },
-      { requestId: expect.any(String), name: '后刹车片', quantity: 2, qualityCodes: ['ORIGINAL_BRAND', 'OTHER_BRAND'], resourceIds: [] },
-    ] })
+    const [publish] = state.writes()
+    expect(state.writes()).toHaveLength(1)
     expect(publish.path).toBe('/api/inquiries')
-    expect(publish.body).toEqual({ draftId: 'draft_test', version: 1, contact: ADDRESSES[1].contact, addressId: 'addr_2', publishOptions: {
-      quotedType: 'SYSTEM', isOpenInvoice: invoice, isAnonymous: true, noReplacement: false, storeIds: [],
-    } })
+    const { brandLogo, energyType, ...snapshot } = MODEL
+    expect(publish.body).toEqual({
+      publishMode: 'DIRECT',
+      source: 'PC',
+      vin: VIN,
+      vehicleSnapshot: snapshot,
+      plateNo: '云A12345',
+      claimNo: 'TEST_CLAIM',
+      items: [
+        { requestId: expect.any(String), name: '前刹车片', quantity: 1, oeCode: 'A0004202404', qualityCodes: ['ORIGINAL_BRAND', 'OTHER_BRAND'] },
+        { requestId: expect.any(String), name: '后刹车片', quantity: 2, qualityCodes: ['ORIGINAL_BRAND', 'OTHER_BRAND'] },
+      ],
+      contact: ADDRESSES[1].contact,
+      addressId: 'addr_2',
+      publishOptions: {
+        quotedType: 'SYSTEM', isOpenInvoice: invoice, isAnonymous: true, noReplacement: false, storeIds: [],
+      },
+    })
+    // DIRECT 不得混入草稿字段或草稿资源 ID。
+    expect(publish.body).not.toHaveProperty('draftId')
+    expect(publish.body).not.toHaveProperty('version')
+    expect(publish.body.items.every((row) => !('resourceIds' in row))).toBe(true)
     expect(publish.headers['idempotency-key']).toMatch(/^[\w-]{8,128}$/)
     await state.assertHealthy()
   })
@@ -223,30 +246,43 @@ test.describe('发布询价 · 隔离 UI/请求契约', () => {
     await state.assertHealthy()
   })
 
-  test('发布中禁止重复点击/修改；失败保留输入，修改后顺序更新版本', async ({ page }) => {
-    let publishRoute
-    const state = await mockApi(page, { publish: (route) => { publishRoute = route } })
+  test('发布中禁止重复点击/修改；失败保留输入，同包体复用幂等键、改包体换键', async ({ page }) => {
+    const publishRoutes = []
+    const state = await mockApi(page, { publish: (route) => { publishRoutes.push(route) } })
     await fillForm(page)
     await page.getByTestId('step-publish').click()
-    await expect.poll(() => Boolean(publishRoute)).toBe(true)
+    await expect.poll(() => publishRoutes.length).toBe(1)
     await expect(page.getByTestId('step-publish')).toBeDisabled()
     await expect(page.getByTestId('vin-input')).toBeDisabled()
     await expect(page.getByTestId('publish-address')).toBeDisabled()
-    await publishRoute.fulfill({ status: 422, json: { code: 42248, message: '测试发布失败' } })
+    await page.getByTestId('step-publish').click({ force: true })
+    expect(publishRoutes).toHaveLength(1)
+    await publishRoutes[0].fulfill({ status: 422, json: { code: 42248, message: '测试发布失败' } })
     await expect(page.getByTestId('error-box')).toContainText('测试发布失败')
     await expect(page).toHaveURL(/#\/publish$/)
     await expect(page.getByTestId('item-name-0')).toHaveValue('前刹车片')
+    // 同一份包体重试：复用同一个幂等键，服务端按首次结果去重。
+    await page.getByTestId('step-publish').click()
+    await expect.poll(() => publishRoutes.length).toBe(2)
+    const first = state.writes()[0]
+    const second = state.writes()[1]
+    expect(second.body).toEqual(first.body)
+    expect(second.headers['idempotency-key']).toBe(first.headers['idempotency-key'])
+    // 第二次也失败，保证页面留在发布页，才能继续验证「改包体换键」。
+    await publishRoutes[1].fulfill({ status: 422, json: { code: 42248, message: '测试发布失败' } })
+    await expect(page.getByTestId('step-publish')).toBeEnabled()
+    await expect(page).toHaveURL(/#\/publish$/)
+    // 改包体后重新提交属于新一次发布，必须换键且只发一次 POST。
     await page.getByTestId('publish-plate-no').fill('云A12345')
     await page.getByTestId('item-qty-0').fill('2')
-    publishRoute = undefined
     await page.getByTestId('step-publish').click()
-    await expect.poll(() => Boolean(publishRoute)).toBe(true)
-    const writes = state.writes()
-    expect(writes.map((r) => r.method)).toEqual(['POST', 'POST', 'PATCH', 'PUT', 'POST'])
-    expect(writes[2].body.version).toBe(1)
-    expect(writes[3].body.version).toBe(2)
-    expect(writes[4].body.version).toBe(3)
-    await ok(publishRoute, { inquiryId: 'inq_test', inquiryNo: 'TEST_ONLY', status: 'PUBLISHED' })
+    await expect.poll(() => publishRoutes.length).toBe(3)
+    const third = state.writes()[2]
+    expect(third.body.plateNo).toBe('云A12345')
+    expect(third.body.items[0].quantity).toBe(2)
+    expect(third.headers['idempotency-key']).not.toBe(first.headers['idempotency-key'])
+    expect(state.writes().map((r) => r.method)).toEqual(['POST', 'POST', 'POST'])
+    await ok(publishRoutes[2], { inquiryId: 'inq_test', inquiryNo: 'TEST_ONLY', status: 'PUBLISHED' })
     await expect(page).toHaveURL(/highlight=inq_test/)
     await state.assertHealthy()
   })

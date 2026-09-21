@@ -37,7 +37,12 @@ test.describe('报价结果页', () => {
     const row = page.getByTestId('quote-row')
     await expect(row).toHaveCount(1)
     await expect(row).toContainText(line.anonymousSupplierName)
-    await expect(row).toContainText(line.qualityCode === 'MOCK_ORIGINAL' ? '联调原厂品质' : line.qualityCode)
+    // 页面展示主数据里的品质名称（design20 字典：ORIGINAL_BRAND = 原厂），不展示 code。
+    const qualityName = (await apiOk(request, '/api/master-data/qualities')).items.find(
+      (item) => item.code === line.qualityCode,
+    )?.name
+    expect(qualityName, `品质字典应包含 ${line.qualityCode}`).toBeTruthy()
+    await expect(row).toContainText(qualityName)
     await expect(row).toContainText(`交期 ${line.leadTimeDays} 天`)
     await expect(row).toContainText(money(line.sellAmount))
     await expect(row.getByTestId('quote-unavailable')).toHaveCount(0)
@@ -82,8 +87,27 @@ test.describe('报价结果页', () => {
     expect(cartLine.itemStatus).toBe('NORMAL')
   })
 
+  // 联调栈的卖家拉取每 500ms 跑一次，新发布的询价单必然被报价；「还没有报价」这一中间态
+  // 只能用网络桩构造（其余断言仍走真实接口）。
   test('暂无报价：展示空态与刷新入口', async ({ page, request }) => {
     const inquiry = await seedPublishedInquiry(request, { itemName: '后视镜' })
+    await page.route('**/api/inquiries/*/quotations*', (route) =>
+      route.fulfill({
+        json: {
+          code: 0,
+          message: 'ok',
+          data: {
+            list: [],
+            pageNum: 1,
+            pageSize: 100,
+            total: 0,
+            inquiryId: inquiry.inquiryId,
+            version: inquiry.inquiryVersion,
+            groupBy: 'SUPPLIER',
+          },
+        },
+      }),
+    )
     await openPage(page, `quotation-result?inquiryId=${inquiry.inquiryId}`)
 
     await expect(page.getByTestId('quote-inquiry-no')).toHaveText(inquiry.inquiryNo)
