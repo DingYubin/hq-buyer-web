@@ -78,7 +78,7 @@ async function sellerOrders(request) {
   const placedFrom = new Date(Date.now() - 3600_000).toISOString()
   const placedTo = new Date(Date.now() + 3600_000).toISOString()
   const response = await request.fetch(
-    `${stack.sellerUrl}/api/v1/supplier/orders?placedFrom=${placedFrom}&placedTo=${placedTo}`,
+    `${stack.sellerUrl}/api/supplier/orders?placedFrom=${placedFrom}&placedTo=${placedTo}`,
     { headers: SELLER_HEADERS },
   )
   const payload = await response.json()
